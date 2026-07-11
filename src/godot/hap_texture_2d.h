@@ -20,6 +20,10 @@ public:
   /// Update the underlying texture from a new Image.
   void update_from_image(const Ref<Image> &p_image);
 
+  virtual RID _get_rid() const override;
+
+  void set_has_alpha(bool p_has_alpha) { has_alpha_ = p_has_alpha; }
+
   virtual int32_t _get_width() const override;
   virtual int32_t _get_height() const override;
   virtual bool _has_alpha() const override;
@@ -35,6 +39,7 @@ private:
   RID rs_texture_;
   int32_t width_ = 0;
   int32_t height_ = 0;
+  bool has_alpha_ = false;
 };
 
 } // namespace godot

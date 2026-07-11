@@ -24,10 +24,14 @@ int32_t HapTexture2D::_get_width() const { return width_; }
 
 int32_t HapTexture2D::_get_height() const { return height_; }
 
-bool HapTexture2D::_has_alpha() const { return false; }
+bool HapTexture2D::_has_alpha() const { return has_alpha_; }
 
 bool HapTexture2D::_is_pixel_opaque(int32_t p_x, int32_t p_y) const {
   return true; // Hap1 is opaque
+}
+
+RID HapTexture2D::_get_rid() const {
+  return rs_texture_;
 }
 
 } // namespace godot

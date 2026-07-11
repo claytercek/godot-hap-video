@@ -13,6 +13,18 @@
 
 #include <cstring>
 
+namespace {
+
+/// Convert decoded texture data to a PackedByteArray for Godot Image creation.
+static godot::PackedByteArray texture_data_to_packed(const hap::core::DecodedTexture &tex) {
+  godot::PackedByteArray img_data;
+  img_data.resize(tex.data.size());
+  memcpy(img_data.ptrw(), tex.data.data(), tex.data.size());
+  return img_data;
+}
+
+} // anonymous namespace
+
 namespace godot {
 
 // -----------------------------------------------------------------------
@@ -90,9 +102,7 @@ void HapVideoStreamPlayback::upload_decoded_frame(
 
   // Create a DXT1 Image from the decoded BC1 data
   Image::Format img_fmt = hap_format_to_image(tex.format);
-  PackedByteArray img_data;
-  img_data.resize(tex.data.size());
-  memcpy(img_data.ptrw(), tex.data.data(), tex.data.size());
+  PackedByteArray img_data = texture_data_to_packed(tex);
 
   Ref<Image> img = Image::create_from_data(track_.width, track_.height, false,
                                            img_fmt, img_data);
