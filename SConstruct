@@ -83,6 +83,10 @@ env.Append(CPPPATH=[
 
 sources = [
     "build/src/godot/register_types.cpp",
+    "build/src/godot/hap_video_stream.cpp",
+    "build/src/godot/hap_video_stream_playback.cpp",
+    "build/src/godot/hap_resource_format_loader.cpp",
+    "build/src/godot/hap_texture_2d.cpp",
 ]
 
 # Core sources (currently empty, but directory structure is ready)
@@ -145,3 +149,36 @@ gdextension_config = env.Command(
 env.Depends(gdextension_config, library)
 
 Default(library, copy, gdextension_config)
+
+# -----------------------------------------------------------------------
+# Core tests (headless, no Godot dependency)
+# -----------------------------------------------------------------------
+if ARGUMENTS.get("build_tests", "0") == "1":
+    test_env = env.Clone()
+    test_env.Append(CPPPATH=["tests/core", "src/", "src/core",
+                              "thirdparty/hap", "thirdparty/snappy",
+                              "thirdparty/minimp4"])
+    test_env.Append(CXXFLAGS=["-g", "-O0"])
+
+    test_sources = [
+        "tests/core/test_demuxer.cpp",
+        "tests/core/test_decoder.cpp",
+    ]
+
+    for src in test_sources:
+        if not os.path.exists(src):
+            continue
+        basename = os.path.splitext(os.path.basename(src))[0]
+        core_objects = [
+            "build/src/core/demuxer.os",
+            "build/src/core/decoder.os",
+            "build/src/core/mmap_reader.os",
+        ]
+        test_bin = test_env.Program(
+            "build/tests/{}".format(basename),
+            [src] + core_objects,
+            LIBS=[hap_lib, snappy_lib, minimp4_lib],
+        )
+        Default(test_bin)
+
+    Alias("core_tests", "build/tests/test_demuxer")

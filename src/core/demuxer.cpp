@@ -1,0 +1,450 @@
+#include "demuxer.h"
+
+#include "minimp4.h"
+
+#include <cstring>
+#include <string>
+#include <vector>
+
+namespace hap {
+namespace core {
+
+// -----------------------------------------------------------------------
+// minimp4 read callback
+// -----------------------------------------------------------------------
+struct ReadContext {
+  const uint8_t *data;
+  int64_t size;
+};
+
+static int minimp4_read(int64_t offset, void *buffer, size_t size,
+                        void *token) {
+  auto *ctx = static_cast<ReadContext *>(token);
+  if (offset + static_cast<int64_t>(size) > ctx->size) {
+    if (offset >= ctx->size)
+      return 1;
+    size = static_cast<size_t>(ctx->size - offset);
+  }
+  std::memcpy(buffer, ctx->data + offset, size);
+  return 0;
+}
+
+// -----------------------------------------------------------------------
+// ISOBMFF box parsing utilities (big-endian)
+// -----------------------------------------------------------------------
+static uint32_t read_u32_be(const uint8_t *p) {
+  return (static_cast<uint32_t>(p[0]) << 24) |
+         (static_cast<uint32_t>(p[1]) << 16) |
+         (static_cast<uint32_t>(p[2]) << 8) |
+         (static_cast<uint32_t>(p[3]));
+}
+
+static uint16_t read_u16_be(const uint8_t *p) {
+  return (static_cast<uint16_t>(p[0]) << 8) | static_cast<uint16_t>(p[1]);
+}
+
+static uint64_t read_u64_be(const uint8_t *p) {
+  return (static_cast<uint64_t>(p[0]) << 56) |
+         (static_cast<uint64_t>(p[1]) << 48) |
+         (static_cast<uint64_t>(p[2]) << 40) |
+         (static_cast<uint64_t>(p[3]) << 32) |
+         (static_cast<uint64_t>(p[4]) << 24) |
+         (static_cast<uint64_t>(p[5]) << 16) |
+         (static_cast<uint64_t>(p[6]) << 8) |
+         (static_cast<uint64_t>(p[7]));
+}
+
+struct BoxHeader {
+  uint64_t offset;
+  uint64_t size;
+  uint32_t type;
+  uint64_t data_pos;
+  uint32_t data_size;
+};
+
+static bool read_box_header(const uint8_t *file_data, uint64_t file_size,
+                            uint64_t offset, BoxHeader &hdr) {
+  if (offset + 8 > file_size)
+    return false;
+
+  uint32_t size_raw = read_u32_be(file_data + offset);
+  uint32_t type = read_u32_be(file_data + offset + 4);
+
+  uint64_t box_size;
+  uint64_t header_size;
+
+  if (size_raw == 1) {
+    if (offset + 16 > file_size)
+      return false;
+    box_size = read_u64_be(file_data + offset + 8);
+    header_size = 16;
+  } else if (size_raw == 0) {
+    box_size = file_size - offset;
+    header_size = 8;
+  } else {
+    box_size = size_raw;
+    header_size = 8;
+  }
+
+  if (box_size < header_size || offset + box_size > file_size)
+    return false;
+
+  hdr.offset = offset;
+  hdr.size = box_size;
+  hdr.type = type;
+  hdr.data_pos = offset + header_size;
+  hdr.data_size = static_cast<uint32_t>(box_size - header_size);
+  return true;
+}
+
+template <typename Visitor>
+static bool walk_children(const uint8_t *file_data, uint64_t file_size,
+                          const BoxHeader &parent, Visitor visitor) {
+  uint64_t end = parent.offset + parent.size;
+  uint64_t pos = parent.data_pos;
+
+  while (pos + 8 <= end) {
+    BoxHeader child;
+    if (!read_box_header(file_data, file_size, pos, child))
+      break;
+    if (visitor(child))
+      return true;
+    pos += child.size;
+    if (pos >= end)
+      break;
+  }
+  return false;
+}
+
+static bool find_trak_at(const uint8_t *file_data, uint64_t file_size,
+                         const BoxHeader &moov, unsigned int track_index,
+                         BoxHeader &out_trak) {
+  unsigned int count = 0;
+  return walk_children(
+      file_data, file_size, moov, [&](const BoxHeader &child) -> bool {
+        if (child.type == 0x7472616B) { // 'trak'
+          if (count == track_index) {
+            out_trak = child;
+            return true;
+          }
+          count++;
+        }
+        return false;
+      });
+}
+
+static bool find_stsd_in_trak(const uint8_t *file_data, uint64_t file_size,
+                              const BoxHeader &trak, BoxHeader &out_stsd) {
+  BoxHeader mdia;
+  if (!walk_children(file_data, file_size, trak,
+                     [&](const BoxHeader &child) -> bool {
+                       if (child.type == 0x6D646961) { // 'mdia'
+                         mdia = child;
+                         return true;
+                       }
+                       return false;
+                     }))
+    return false;
+
+  BoxHeader minf;
+  if (!walk_children(file_data, file_size, mdia,
+                     [&](const BoxHeader &child) -> bool {
+                       if (child.type == 0x6D696E66) { // 'minf'
+                         minf = child;
+                         return true;
+                       }
+                       return false;
+                     }))
+    return false;
+
+  BoxHeader stbl;
+  if (!walk_children(file_data, file_size, minf,
+                     [&](const BoxHeader &child) -> bool {
+                       if (child.type == 0x7374626C) { // 'stbl'
+                         stbl = child;
+                         return true;
+                       }
+                       return false;
+                     }))
+    return false;
+
+  return walk_children(file_data, file_size, stbl,
+                       [&](const BoxHeader &child) -> bool {
+                         if (child.type == 0x73747364) { // 'stsd'
+                           out_stsd = child;
+                           return true;
+                         }
+                         return false;
+                       });
+}
+
+// -----------------------------------------------------------------------
+// stsd box parsing
+//
+// stsd is a FullBox: version(1) + flags(3) + entry_count(4)
+// For each entry (SampleEntry):
+//   size(4) + type(4 {FourCC}) + reserved(6) + data_reference_index(2)
+// VisualSampleEntry (video) continues:
+//   pre_defined(2) + reserved(2) + pre_defined(12) + width(2) + height(2)
+// -----------------------------------------------------------------------
+bool Demuxer::parse_stsd(const uint8_t *data, uint32_t size,
+                         FourCC &out_fourcc, uint32_t &out_width,
+                         uint32_t &out_height) {
+  if (size < 8)
+    return false;
+
+  uint32_t entry_count = read_u32_be(data + 4);
+  uint32_t offset = 8; // past full-box header (version+flags+entry_count)
+
+  for (uint32_t i = 0; i < entry_count; i++) {
+    if (offset + 8 > size)
+      return false;
+
+    uint32_t entry_size = read_u32_be(data + offset);
+    FourCC fourcc(read_u32_be(data + offset + 4));
+
+    bool is_hap = (fourcc == FCC_Hap1 || fourcc == FCC_Hap5 ||
+                   fourcc == FCC_HapY || fourcc == FCC_HapM ||
+                   fourcc == FCC_Hap7);
+
+    if (is_hap) {
+      // Dimensions at offset+32: after SampleEntry(16 bytes) +
+      // pre_defined(2) + reserved(2) + pre_defined(12) = 32 bytes
+      uint32_t dim_offset = offset + 32;
+      if (dim_offset + 4 <= size) {
+        out_width = read_u16_be(data + dim_offset);
+        out_height = read_u16_be(data + dim_offset + 2);
+        out_fourcc = fourcc;
+        return true;
+      }
+    }
+
+    if (entry_size == 0)
+      break;
+    offset += entry_size;
+    if (offset >= size)
+      break;
+  }
+
+  return false;
+}
+
+// -----------------------------------------------------------------------
+// Validate all sample offsets/sizes against the file size
+// -----------------------------------------------------------------------
+bool Demuxer::validate_samples(const std::vector<SampleEntry> &samples,
+                               uint64_t file_size, std::string &error) {
+  for (size_t i = 0; i < samples.size(); i++) {
+    uint64_t end = static_cast<uint64_t>(samples[i].offset) +
+                   static_cast<uint64_t>(samples[i].size);
+    if (end > file_size) {
+      error = "Sample " + std::to_string(i) + " at offset " +
+              std::to_string(samples[i].offset) + " size " +
+              std::to_string(samples[i].size) + " exceeds file size (" +
+              std::to_string(file_size) + ")";
+      return false;
+    }
+  }
+  return true;
+}
+
+// -----------------------------------------------------------------------
+// Destructor / Move
+// -----------------------------------------------------------------------
+Demuxer::~Demuxer() {
+  if (mp4_) {
+    MP4D_close(mp4_);
+    delete mp4_;
+  }
+}
+
+Demuxer::Demuxer(Demuxer &&other) noexcept
+    : mp4_(other.mp4_), valid_(other.valid_), track_(other.track_),
+      samples_(std::move(other.samples_)), file_size_(other.file_size_) {
+  other.mp4_ = nullptr;
+  other.valid_ = false;
+}
+
+Demuxer &Demuxer::operator=(Demuxer &&other) noexcept {
+  if (this != &other) {
+    if (mp4_) {
+      MP4D_close(mp4_);
+      delete mp4_;
+    }
+    mp4_ = other.mp4_;
+    valid_ = other.valid_;
+    track_ = other.track_;
+    samples_ = std::move(other.samples_);
+    file_size_ = other.file_size_;
+    other.mp4_ = nullptr;
+    other.valid_ = false;
+  }
+  return *this;
+}
+
+// -----------------------------------------------------------------------
+// Open: parse the MOV file, find Hap video track, cache all samples
+// -----------------------------------------------------------------------
+DemuxResult Demuxer::open(const MmapReader &reader) {
+  DemuxResult result;
+  valid_ = false;
+  samples_.clear();
+  track_ = VideoTrackInfo{};
+  file_size_ = reader.size();
+
+  // Allocate and initialize minimp4 context
+  mp4_ = new (std::nothrow) MP4D_demux_t();
+  if (!mp4_) {
+    result.error_message = "Out of memory allocating demux context";
+    return result;
+  }
+  std::memset(mp4_, 0, sizeof(*mp4_));
+
+  ReadContext read_ctx;
+  read_ctx.data = reader.data();
+  read_ctx.size = static_cast<int64_t>(reader.size());
+
+  if (!MP4D_open(mp4_, minimp4_read, &read_ctx, read_ctx.size)) {
+    result.error_message = "Failed to open/parse MOV file";
+    delete mp4_;
+    mp4_ = nullptr;
+    return result;
+  }
+
+  // Find the moov box in the raw file by scanning top-level boxes
+  const uint8_t *file_data = reader.data();
+  uint64_t file_size = reader.size();
+
+  BoxHeader moov;
+  uint64_t pos = 0;
+  bool found_moov = false;
+  while (pos + 8 <= file_size) {
+    BoxHeader hdr;
+    if (!read_box_header(file_data, file_size, pos, hdr))
+      break;
+    if (hdr.type == 0x6D6F6F76) { // 'moov'
+      moov = hdr;
+      found_moov = true;
+      break;
+    }
+    pos += hdr.size;
+    if (pos >= file_size)
+      break;
+  }
+
+  if (!found_moov) {
+    result.error_message = "No moov box found in MOV file";
+    MP4D_close(mp4_);
+    delete mp4_;
+    mp4_ = nullptr;
+    return result;
+  }
+
+  // Walk tracks to find the Hap video track.
+  // For each track index t (matching minimp4 track order), manually
+  // find and parse its stsd box to check for Hap FourCCs.
+  unsigned int hap_track_index = 0;
+  bool found_hap = false;
+  FourCC found_fourcc;
+  uint32_t found_width = 0;
+  uint32_t found_height = 0;
+
+  for (unsigned int t = 0; t < mp4_->track_count; t++) {
+    BoxHeader trak;
+    if (!find_trak_at(file_data, file_size, moov, t, trak))
+      continue;
+
+    BoxHeader stsd;
+    if (!find_stsd_in_trak(file_data, file_size, trak, stsd))
+      continue;
+
+    if (parse_stsd(file_data + stsd.data_pos, stsd.data_size, found_fourcc,
+                   found_width, found_height)) {
+      hap_track_index = t;
+      found_hap = true;
+      break;
+    }
+  }
+
+  if (!found_hap) {
+    result.error_message = "No Hap video track found in file";
+    MP4D_close(mp4_);
+    delete mp4_;
+    mp4_ = nullptr;
+    return result;
+  }
+
+  // Extract sample info from minimp4 for the found Hap track
+  auto &mp4_track = mp4_->track[hap_track_index];
+  uint32_t num_samples = mp4_track.sample_count;
+
+  if (num_samples == 0) {
+    result.error_message = "Hap video track has zero samples";
+    MP4D_close(mp4_);
+    delete mp4_;
+    mp4_ = nullptr;
+    return result;
+  }
+
+  // Cache all sample offsets/sizes
+  samples_.reserve(num_samples);
+  for (uint32_t i = 0; i < num_samples; i++) {
+    unsigned int frame_bytes = 0;
+    unsigned int timestamp = 0;
+    unsigned int duration = 0;
+    MP4D_file_offset_t offset = MP4D_frame_offset(
+        mp4_, hap_track_index, i, &frame_bytes, &timestamp, &duration);
+
+    SampleEntry entry;
+    entry.offset = static_cast<uint64_t>(offset);
+    entry.size = frame_bytes;
+    samples_.push_back(entry);
+  }
+
+  // Validate all samples against file size
+  std::string validation_error;
+  if (!validate_samples(samples_, file_size_, validation_error)) {
+    result.error_message = validation_error;
+    MP4D_close(mp4_);
+    delete mp4_;
+    mp4_ = nullptr;
+    return result;
+  }
+
+  // Populate track info
+  track_.fourcc = found_fourcc;
+  track_.width = found_width;
+  track_.height = found_height;
+  track_.frame_count = num_samples;
+  track_.timescale = mp4_track.timescale;
+
+  // Compute frame rate from first sample's duration
+  if (num_samples > 0) {
+    unsigned int frame_bytes = 0;
+    unsigned int timestamp = 0;
+    unsigned int duration = 0;
+    MP4D_frame_offset(mp4_, hap_track_index, 0, &frame_bytes, &timestamp,
+                      &duration);
+    if (duration > 0 && mp4_track.timescale > 0) {
+      track_.frame_rate =
+          static_cast<double>(mp4_track.timescale) /
+          static_cast<double>(duration);
+    }
+  }
+
+  valid_ = true;
+  result.valid = true;
+  result.track = track_;
+  result.samples = samples_;
+  return result;
+}
+
+const uint8_t *Demuxer::sample_data(const MmapReader &reader,
+                                    uint32_t index) const {
+  if (!valid_ || index >= samples_.size())
+    return nullptr;
+  return reader.data() + samples_[index].offset;
+}
+
+} // namespace core
+} // namespace hap

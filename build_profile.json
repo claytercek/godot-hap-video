@@ -3,6 +3,17 @@
 	"enabled_classes": [
 		"Engine",
 		"OS",
-		"ProjectSettings"
+		"ProjectSettings",
+		"ResourceFormatLoader",
+		"VideoStream",
+		"VideoStreamPlayback",
+		"Texture2DRD",
+		"Texture2D",
+		"RenderingServer",
+		"RenderingDevice",
+		"FileAccess",
+		"Resource",
+		"RefCounted",
+		"Image"
 	]
 }
