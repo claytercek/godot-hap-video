@@ -3,9 +3,8 @@
 #include "core/decoder.h"
 #include "core/hap_frame.h"
 
-#include "hap_texture_2d.h"
+#include "gpu_presenter.h"
 
-#include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/error_macros.hpp>
@@ -13,39 +12,7 @@
 
 #include <cstring>
 
-namespace {
-
-/// Convert decoded texture data to a PackedByteArray for Godot Image creation.
-static godot::PackedByteArray texture_data_to_packed(const hap::core::DecodedTexture &tex) {
-  godot::PackedByteArray img_data;
-  img_data.resize(tex.data.size());
-  memcpy(img_data.ptrw(), tex.data.data(), tex.data.size());
-  return img_data;
-}
-
-} // anonymous namespace
-
 namespace godot {
-
-// -----------------------------------------------------------------------
-// Hap texture format -> Image format mapping
-// -----------------------------------------------------------------------
-static Image::Format hap_format_to_image(hap::core::HapTextureFormat fmt) {
-  switch (fmt) {
-  case hap::core::HapTextureFormat::RGB_DXT1:
-    return Image::FORMAT_DXT1;
-  case hap::core::HapTextureFormat::RGBA_DXT5:
-    return Image::FORMAT_DXT5;
-  case hap::core::HapTextureFormat::YCoCg_DXT5:
-    return Image::FORMAT_DXT5;
-  case hap::core::HapTextureFormat::A_RGTC1:
-    return Image::FORMAT_RGTC_R;
-  case hap::core::HapTextureFormat::RGBA_BPTC_UNORM:
-    return Image::FORMAT_BPTC_RGBA;
-  default:
-    return Image::FORMAT_DXT1;
-  }
-}
 
 // -----------------------------------------------------------------------
 // Open
@@ -73,8 +40,17 @@ bool HapVideoStreamPlayback::open(const String &p_path) {
   }
   length_ = frame_duration_ * track_.frame_count;
 
-  // Create the display texture
-  display_texture_.instantiate();
+  // Initialize the GPU presenter
+  RenderingDevice *rd = RenderingServer::get_singleton()->get_rendering_device();
+  if (rd) {
+    gpu_initialized_ = gpu_presenter_.initialize(
+        rd, track_.width, track_.height, track_.fourcc);
+    if (!gpu_initialized_) {
+      ERR_PRINT("HapVideo: Failed to initialize GPU presenter");
+    }
+  } else {
+    ERR_PRINT("HapVideo: No RenderingDevice available");
+  }
 
   // Decode the first frame
   const uint8_t *sample = demuxer_.sample_data(mmap_, 0);
@@ -96,23 +72,9 @@ void HapVideoStreamPlayback::upload_decoded_frame(
   if (frame.textures.empty())
     return;
 
-  const auto &tex = frame.textures[0];
-  if (tex.data.empty())
-    return;
-
-  // Create a DXT1 Image from the decoded BC1 data
-  Image::Format img_fmt = hap_format_to_image(tex.format);
-  PackedByteArray img_data = texture_data_to_packed(tex);
-
-  Ref<Image> img = Image::create_from_data(track_.width, track_.height, false,
-                                           img_fmt, img_data);
-  if (!img.is_valid()) {
-    ERR_PRINT("HapVideo: Failed to create Image from frame data");
-    return;
+  if (gpu_initialized_) {
+    gpu_presenter_.present(frame);
   }
-
-  // Update the display texture
-  display_texture_->update_from_image(img);
 }
 
 // -----------------------------------------------------------------------
@@ -163,14 +125,17 @@ void HapVideoStreamPlayback::_seek(double p_time) {
 void HapVideoStreamPlayback::_set_audio_track(int32_t p_idx) {}
 
 Ref<Texture2D> HapVideoStreamPlayback::_get_texture() const {
-  return display_texture_;
+  if (gpu_initialized_) {
+    return gpu_presenter_.get_texture();
+  }
+  return Ref<Texture2D>();
 }
 
 void HapVideoStreamPlayback::_update(double p_delta) {
   if (!is_playing_ || is_paused_)
     return;
 
-  if (!mmap_ || !demuxer_.is_valid() || !display_texture_.is_valid())
+  if (!mmap_ || !demuxer_.is_valid())
     return;
 
   current_time_ += p_delta;

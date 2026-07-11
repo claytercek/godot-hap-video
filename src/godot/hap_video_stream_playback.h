@@ -1,8 +1,9 @@
 #ifndef HAP_VIDEO_STREAM_PLAYBACK_H
 #define HAP_VIDEO_STREAM_PLAYBACK_H
 
-#include "hap_texture_2d.h"
+#include "gpu_presenter.h"
 #include <godot_cpp/classes/ref.hpp>
+#include <godot_cpp/classes/texture2drd.hpp>
 #include <godot_cpp/classes/video_stream_playback.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/string.hpp>
@@ -61,10 +62,11 @@ private:
   double frame_duration_ = 0.0;
   double length_ = 0.0;
 
-  // Display texture
-  Ref<HapTexture2D> display_texture_;
+  // GPU presenter for RD-based texture upload + compute
+  GpuPresenter gpu_presenter_;
+  bool gpu_initialized_ = false;
 
-  /// Upload a decoded frame to the GPU display texture.
+  /// Upload a decoded frame to the GPU.
   void upload_decoded_frame(const hap::core::DecodedFrame &frame);
 };
 
