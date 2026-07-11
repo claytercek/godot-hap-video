@@ -1,0 +1,46 @@
+# Godot auto-generated files
+.gen.*
+.godot/
+
+# Build artifacts
+bin/*
+!bin/.gitkeep
+build/
+.sconsign*.dblite
+
+# Generated addon artifacts (binaries + .gdextension manifest)
+addons/hap_video/
+
+# Custom build config
+custom.py
+
+# Compile commands
+compile_commands.json
+
+# Object/library files
+*.o
+*.os
+*.obj
+*.bc
+*.pyc
+*.dblite
+*.pdb
+*.lib
+*.exp
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+.idea/
+cmake-build*
+CMakeUserPresets.json
+
+# Other
+*.log
+*.config
+*.creator
+*.creator.user
+*.files
+*.includes
+*.idb

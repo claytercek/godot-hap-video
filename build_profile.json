@@ -1,0 +1,8 @@
+{
+	"type": "feature_profile",
+	"enabled_classes": [
+		"Engine",
+		"OS",
+		"ProjectSettings"
+	]
+}
