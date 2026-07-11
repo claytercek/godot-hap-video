@@ -187,24 +187,24 @@ static bool find_stsd_in_trak(const uint8_t *file_data, uint64_t file_size,
 // VisualSampleEntry (video) continues:
 //   pre_defined(2) + reserved(2) + pre_defined(12) + width(2) + height(2)
 // -----------------------------------------------------------------------
-bool Demuxer::parse_stsd(const uint8_t *data, uint32_t size,
+StsdResult Demuxer::parse_stsd(const uint8_t *data, uint32_t size,
                          VideoFormat &out_format) {
   if (size < 8)
-    return false;
+    return StsdResult::NoMatch;
 
   uint32_t entry_count = read_u32_be(data + 4);
   uint32_t offset = 8; // past full-box header (version+flags+entry_count)
 
   for (uint32_t i = 0; i < entry_count; i++) {
     if (offset + 8 > size)
-      return false;
+      return StsdResult::NoMatch;
 
     uint32_t entry_size = read_u32_be(data + offset);
     FourCC fourcc(read_u32_be(data + offset + 4));
 
-    bool is_hap = (fourcc == FCC_Hap1 || fourcc == FCC_Hap5 ||
-                   fourcc == FCC_HapY || fourcc == FCC_HapM ||
-                   fourcc == FCC_Hap7);
+    bool is_hap = is_known_hap_fourcc(fourcc);
+    bool is_unsupported_hap = (fourcc == FCC_HapA ||
+                               fourcc == FCC_HapHDR);
 
     if (is_hap) {
       // Dimensions at offset+32: after SampleEntry(16 bytes) +
@@ -214,8 +214,13 @@ bool Demuxer::parse_stsd(const uint8_t *data, uint32_t size,
         out_format.width = read_u16_be(data + dim_offset);
         out_format.height = read_u16_be(data + dim_offset + 2);
         out_format.fourcc = fourcc;
-        return true;
+        return StsdResult::Found;
       }
+    }
+
+    if (is_unsupported_hap) {
+      out_format.fourcc = fourcc;
+      return StsdResult::Unsupported;
     }
 
     if (entry_size == 0)
@@ -225,7 +230,7 @@ bool Demuxer::parse_stsd(const uint8_t *data, uint32_t size,
       break;
   }
 
-  return false;
+  return StsdResult::NoMatch;
 }
 
 // -----------------------------------------------------------------------
@@ -343,6 +348,8 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
   // find and parse its stsd box to check for Hap FourCCs.
   unsigned int hap_track_index = 0;
   bool found_hap = false;
+  bool found_unsupported_hap = false;
+  FourCC unsupported_hap_fourcc;
   VideoFormat hap_format;
 
   for (unsigned int t = 0; t < mp4_->track_count; t++) {
@@ -354,15 +361,29 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
     if (!find_stsd_in_trak(file_data, file_size, trak, stsd))
       continue;
 
-    if (parse_stsd(file_data + stsd.data_pos, stsd.data_size, hap_format)) {
+    StsdResult stsd_result =
+        parse_stsd(file_data + stsd.data_pos, stsd.data_size, hap_format);
+
+    if (stsd_result == StsdResult::Found) {
       hap_track_index = t;
       found_hap = true;
       break;
     }
+
+    if (stsd_result == StsdResult::Unsupported) {
+      found_unsupported_hap = true;
+      unsupported_hap_fourcc = hap_format.fourcc;
+    }
   }
 
   if (!found_hap) {
-    result.error_message = "No Hap video track found in file";
+    if (found_unsupported_hap) {
+      result.error_message =
+          "Unsupported Hap variant (" + unsupported_hap_fourcc.to_string() +
+          ") found in file \u2014 only Hap1, Hap5, HapY, HapM, Hap7 are supported";
+    } else {
+      result.error_message = "No Hap video track found in file";
+    }
     cleanup_mp4();
     return result;
   }

@@ -66,6 +66,24 @@ constexpr FourCC FCC_HapY{'H', 'a', 'p', 'Y'}; // Hap Q (YCoCg-DXT5)
 constexpr FourCC FCC_HapM{'H', 'a', 'p', 'M'}; // Hap Q Alpha (dual texture)
 constexpr FourCC FCC_Hap7{'H', 'a', 'p', '7'}; // Hap R (BC7/BPTC)
 
+// Unsupported Hap FourCCs (used for testing the error path)
+constexpr FourCC FCC_HapA{'H', 'a', 'p', 'A'}; // HapA (alpha-only, unsupported)
+constexpr FourCC FCC_HapHDR{'H', 'a', 'p', 'H'}; // Hap HDR (BC6, unsupported)
+
+/// Check if a FourCC is a known (supported) Hap variant.
+inline bool is_known_hap_fourcc(FourCC fourcc) {
+  return fourcc == FCC_Hap1 || fourcc == FCC_Hap5 ||
+         fourcc == FCC_HapY || fourcc == FCC_HapM ||
+         fourcc == FCC_Hap7;
+}
+
+/// Result of parsing an stsd box.
+enum class StsdResult {
+  NoMatch,       ///< No Hap variant found in this stsd.
+  Found,         ///< A supported Hap variant was found.
+  Unsupported,   ///< An unsupported Hap variant was found (HapA, Hap HDR, etc.).
+};
+
 /// Parsed track dimensions and FourCC from stsd.
 struct VideoFormat {
   FourCC fourcc;

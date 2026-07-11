@@ -27,7 +27,9 @@ int32_t HapTexture2D::_get_height() const { return height_; }
 bool HapTexture2D::_has_alpha() const { return has_alpha_; }
 
 bool HapTexture2D::_is_pixel_opaque(int32_t p_x, int32_t p_y) const {
-  return true; // Hap1 is opaque
+  // Alpha-bearing formats allow click-through on transparent regions; opaque
+  // formats capture input across the whole rect.
+  return !has_alpha_;
 }
 
 RID HapTexture2D::_get_rid() const {

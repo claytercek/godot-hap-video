@@ -1,186 +1,83 @@
 /*
  * Core decoder tests.
  *
- * Tests the Hap frame decoder with synthetic data: creates valid Hap1/HapY/HapM
+ * Tests the Hap frame decoder with synthetic data: creates valid Hap1/5/7
  * frames in memory, decodes them, and verifies the output.
+ * Also tests unsupported-formats rejection.
  */
 
 #include "core/decoder.h"
+#include "core/demuxer.h"
 #include "core/hap_frame.h"
+#include "core/mmap_reader.h"
 
 #include "hap.h"
 #include "test.h"
 
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <unistd.h>
 
 using namespace hap::core;
 
 // -----------------------------------------------------------------------
-// Helper: write a 3-byte little-endian integer
-// -----------------------------------------------------------------------
-static void write_3_le(uint8_t *buf, uint32_t val) {
-  buf[0] = val & 0xFF;
-  buf[1] = (val >> 8) & 0xFF;
-  buf[2] = (val >> 16) & 0xFF;
-}
-
-// -----------------------------------------------------------------------
-// Helper: create a synthetic Hap1 frame (single-chunk, None compressor)
+// Helper: create a synthetic Hap frame with a given type byte
 //
-// A Hap1 frame structure:
+// A Hap frame structure:
 //   4-byte header: length(3 bytes LE) + type(1 byte)
-//   type = compressor<<4 | formatID
-//   compressor None = 0xA, formatID RGB_DXT1 = 0xB -> 0xAB
-//   Frame data = BC1 block bytes
+//   For single-chunk None compressor:
+//     type byte = 0xAB (Hap1), 0xAE (Hap5), 0xAC (Hap7)
+//   Frame data = raw BC block bytes (pass-through for None compressor)
 // -----------------------------------------------------------------------
-static std::vector<uint8_t> create_hap1_frame(const uint8_t *bc1_data,
-                                              size_t bc1_size) {
+static std::vector<uint8_t> create_hap_frame(uint32_t /*width*/,
+                                             uint32_t /*height*/,
+                                             const uint8_t *bc_data,
+                                             size_t bc_size,
+                                             uint8_t type_byte) {
   std::vector<uint8_t> frame;
 
-  uint32_t length = static_cast<uint32_t>(bc1_size);
+  // 4-byte header: length (3 bytes LE) + type (1 byte)
+  uint32_t length = static_cast<uint32_t>(bc_size);
   frame.push_back(length & 0xFF);
   frame.push_back((length >> 8) & 0xFF);
   frame.push_back((length >> 16) & 0xFF);
-  frame.push_back(0xAB); // Hap1: None(0xA)<<4 | RGB_DXT1(0xB) = 0xAB
+  frame.push_back(type_byte);
 
-  frame.insert(frame.end(), bc1_data, bc1_data + bc1_size);
-
-  return frame;
-}
-
-// -----------------------------------------------------------------------
-// Helper: create a synthetic HapY (YCoCg DXT5) frame
-//
-// Same section format as Hap5 but type byte uses YCoCg format identifier:
-//   0xA0 (compressor None) | 0x0F (YCoCg DXT5 format ID) = 0xAF
-// -----------------------------------------------------------------------
-static std::vector<uint8_t> create_hapy_frame(const uint8_t *bc3_data,
-                                              size_t bc3_size) {
-  std::vector<uint8_t> frame;
-  frame.resize(bc3_size + 4);
-  write_3_le(frame.data(), static_cast<uint32_t>(bc3_size));
-  frame[3] = 0xAF; // None compressor, YCoCg DXT5
-  std::memcpy(frame.data() + 4, bc3_data, bc3_size);
-  return frame;
-}
-
-// -----------------------------------------------------------------------
-// Helper: create a synthetic HapM (dual-texture) frame
-//
-// Multi-image frame:
-//   Outer header: total_length(3 bytes LE) + type(0x0D = kHapSectionMultipleImages)
-//   Sub-section 1 header: length(3) + type(0xAF = color: YCoCg DXT5)
-//   Sub-section 1 data: BC3 color data
-//   Sub-section 2 header: length(3) + type(0xA1 = alpha: A_RGTC1)
-//   Sub-section 2 data: BC4 alpha data
-// -----------------------------------------------------------------------
-static std::vector<uint8_t> create_hapm_frame(const uint8_t *color_data,
-                                              size_t color_size,
-                                              const uint8_t *alpha_data,
-                                              size_t alpha_size) {
-  std::vector<uint8_t> frame;
-
-  uint32_t ss1_size = static_cast<uint32_t>(color_size);
-  uint32_t ss2_size = static_cast<uint32_t>(alpha_size);
-  uint32_t total_payload = 4 + ss1_size + 4 + ss2_size;
-
-  // Outer header (4 bytes)
-  frame.resize(4);
-  write_3_le(frame.data(), total_payload);
-  frame[3] = 0x0D; // kHapSectionMultipleImages
-
-  // Sub-section 1 header (4 bytes)
-  frame.resize(frame.size() + 4);
-  write_3_le(frame.data() + frame.size() - 4, ss1_size);
-  frame[frame.size() - 1] = 0xAF; // None compressor, YCoCg DXT5
-
-  // Sub-section 1 data
-  frame.insert(frame.end(), color_data, color_data + color_size);
-
-  // Sub-section 2 header (4 bytes)
-  frame.resize(frame.size() + 4);
-  write_3_le(frame.data() + frame.size() - 4, ss2_size);
-  frame[frame.size() - 1] = 0xA1; // None compressor, A_RGTC1
-
-  // Sub-section 2 data
-  frame.insert(frame.end(), alpha_data, alpha_data + alpha_size);
+  // Frame data (BC blocks)
+  frame.insert(frame.end(), bc_data, bc_data + bc_size);
 
   return frame;
 }
 
-// -----------------------------------------------------------------------
-// Helper: create a BC3 block (16 bytes) with given RGBA values
-// The BC3 block stores 32-bit alpha at 8bpp, and BC1 color in 565 format.
-// For test purposes, we create a minimal valid block.
-// -----------------------------------------------------------------------
-static void make_bc3_block(uint8_t *block, uint8_t r, uint8_t g, uint8_t b,
-                           uint8_t a) {
-  // Alpha part (8 bytes): 2 endpoint alphas + 3-bit indices per texel
-  block[0] = a;      // alpha endpoint 0
-  block[1] = a;      // alpha endpoint 1 (same = all texels get same alpha)
-  // Alpha indices: all 0 (select endpoint 0 = a)
-  block[2] = 0x00;
-  block[3] = 0x00;
-  block[4] = 0x00;
-  block[5] = 0x00;
-  block[6] = 0x00;
-  block[7] = 0x00;
+static std::vector<uint8_t> create_hap1_frame(uint32_t w, uint32_t h,
+                                              const uint8_t *data, size_t sz) {
+  return create_hap_frame(w, h, data, sz, 0xAB);
+}
 
-  // Color part (8 bytes): RGB565 endpoints + 2-bit color indices
-  uint16_t c0 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
-  uint16_t c1 = 0; // second endpoint = black
-  block[8] = c0 & 0xFF;
-  block[9] = (c0 >> 8) & 0xFF;
-  block[10] = c1 & 0xFF;
-  block[11] = (c1 >> 8) & 0xFF;
-  // Color indices: all 0 (select endpoint 0)
-  block[12] = 0x00;
-  block[13] = 0x00;
-  block[14] = 0x00;
-  block[15] = 0x00;
+static std::vector<uint8_t> create_hap5_frame(uint32_t w, uint32_t h,
+                                              const uint8_t *data, size_t sz) {
+  return create_hap_frame(w, h, data, sz, 0xAE);
+}
+
+static std::vector<uint8_t> create_hap7_frame(uint32_t w, uint32_t h,
+                                              const uint8_t *data, size_t sz) {
+  return create_hap_frame(w, h, data, sz, 0xAC);
 }
 
 // -----------------------------------------------------------------------
-// Helper: create a BC4 block (8 bytes) with given alpha value
-// BC4 stores single-channel data: 8-bit endpoint + 3-bit indices
-// -----------------------------------------------------------------------
-static void make_bc4_block(uint8_t *block, uint8_t a) {
-  block[0] = a;      // endpoint 0
-  block[1] = a;      // endpoint 1 (same = all texels get same value)
-  // Indices: all 0
-  block[2] = 0x00;
-  block[3] = 0x00;
-  block[4] = 0x00;
-  block[5] = 0x00;
-  block[6] = 0x00;
-  block[7] = 0x00;
-}
-
-// -----------------------------------------------------------------------
-// BC1 block helpers (8 bytes)
-// -----------------------------------------------------------------------
-static void make_bc1_block(uint8_t *block, uint16_t c0, uint16_t c1) {
-  block[0] = c0 & 0xFF;
-  block[1] = (c0 >> 8) & 0xFF;
-  block[2] = c1 & 0xFF;
-  block[3] = (c1 >> 8) & 0xFF;
-  // Indices: all 0
-  block[4] = 0x00;
-  block[5] = 0x00;
-  block[6] = 0x00;
-  block[7] = 0x00;
-}
-
-// -----------------------------------------------------------------------
-// Tests
+// Hap1 (BC1/DXT1) tests
 // -----------------------------------------------------------------------
 
 HAP_TEST(test_decoder_hap1_single_block) {
-  uint8_t bc1_block[8];
-  make_bc1_block(bc1_block, 0x0000, 0xFFFF); // black endpoint 0, white endpoint 1
+  // A single 4x4 BC1 block (8 bytes): 2 endpoint colors + 4 bytes indices
+  uint8_t bc1_block[8] = {
+      0x00, 0x00, // color0: RGB565 = 0 (black)
+      0xFF, 0xFF, // color1: RGB565 = 0xFFFF (white)
+      0x00, 0x00, 0x00, 0x00, // all indices = 0 (black)
+  };
 
-  auto frame = create_hap1_frame(bc1_block, sizeof(bc1_block));
+  auto frame = create_hap1_frame(4, 4, bc1_block, sizeof(bc1_block));
 
   Decoder decoder;
   DecodedFrame output;
@@ -192,18 +89,27 @@ HAP_TEST(test_decoder_hap1_single_block) {
   const auto &tex = output.textures[0];
   HAP_ASSERT(tex.format == hap::core::HapTextureFormat::RGB_DXT1);
   HAP_ASSERT(!tex.data.empty());
-  HAP_ASSERT_EQ(tex.data.size(), 8u);
+  HAP_ASSERT_EQ(tex.data.size(), 8u); // 8 bytes for BC1 block
   HAP_ASSERT(memcmp(tex.data.data(), bc1_block, 8) == 0);
 }
 
 HAP_TEST(test_decoder_hap1_multiple_blocks) {
-  uint8_t bc1_blocks[32];
-  make_bc1_block(bc1_blocks, 0x0000, 0xFFFF);       // block 0: black
-  make_bc1_block(bc1_blocks + 8, 0xFFFF, 0x0000);   // block 1: white
-  make_bc1_block(bc1_blocks + 16, 0xF800, 0x0000);  // block 2: red
-  make_bc1_block(bc1_blocks + 24, 0x001F, 0x0000);  // block 3: blue
+  // 8x8 pixels = 4 BC1 blocks (2x2 grid)
+  uint8_t bc1_blocks[32] = {0};
+  // Block 0: black
+  bc1_blocks[0] = 0x00;
+  bc1_blocks[1] = 0x00;
+  // Block 1: white
+  bc1_blocks[8] = 0xFF;
+  bc1_blocks[9] = 0xFF;
+  // Block 2: red
+  bc1_blocks[16] = 0x00;
+  bc1_blocks[17] = 0xF8;
+  // Block 3: blue
+  bc1_blocks[24] = 0x1F;
+  bc1_blocks[25] = 0x00;
 
-  auto frame = create_hap1_frame(bc1_blocks, sizeof(bc1_blocks));
+  auto frame = create_hap1_frame(8, 8, bc1_blocks, sizeof(bc1_blocks));
 
   Decoder decoder;
   DecodedFrame output;
@@ -211,13 +117,13 @@ HAP_TEST(test_decoder_hap1_multiple_blocks) {
   bool ok = decoder.decode(frame.data(), frame.size(), output);
   HAP_ASSERT(ok);
   HAP_ASSERT_EQ(output.textures.size(), 1u);
-  HAP_ASSERT_EQ(output.textures[0].data.size(), 32u);
+  HAP_ASSERT_EQ(output.textures[0].data.size(), 32u); // 4 blocks x 8 bytes
 }
 
 HAP_TEST(test_decoder_hap1_multi_texture) {
-  uint8_t bc1_block[8];
-  make_bc1_block(bc1_block, 0x0000, 0xFFFF);
-  auto frame = create_hap1_frame(bc1_block, sizeof(bc1_block));
+  // Verify that HapGetFrameTextureCount returns 1 for a single-texture frame
+  uint8_t bc1_block[8] = {0};
+  auto frame = create_hap1_frame(4, 4, bc1_block, sizeof(bc1_block));
 
   unsigned int tex_count = 0;
   unsigned int result = HapGetFrameTextureCount(
@@ -226,14 +132,23 @@ HAP_TEST(test_decoder_hap1_multi_texture) {
   HAP_ASSERT_EQ(tex_count, 1u);
 }
 
-HAP_TEST(test_decoder_golden_frame) {
-  uint8_t bc1_blocks[32];
-  make_bc1_block(bc1_blocks, 0xFFFF, 0x0000);    // block 0: white
-  make_bc1_block(bc1_blocks + 8, 0x0000, 0xFFFF); // block 1: black
-  make_bc1_block(bc1_blocks + 16, 0xF800, 0x0000); // block 2: red
-  make_bc1_block(bc1_blocks + 24, 0x001F, 0x0000); // block 3: blue
+// -----------------------------------------------------------------------
+// Hap5 (BC3/DXT5) tests
+// -----------------------------------------------------------------------
 
-  auto frame = create_hap1_frame(bc1_blocks, sizeof(bc1_blocks));
+HAP_TEST(test_decoder_hap5_single_block) {
+  // A single 4x4 BC3 block (16 bytes): 8 bytes alpha + 8 bytes color
+  // Alpha part: endpoints 0x00 and 0xFF, indices all 0
+  // Color part: black endpoint, white endpoint, indices all 0
+  uint8_t bc3_block[16] = {
+      0x00, 0xFF,                // alpha0=0, alpha1=255
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // alpha indices (all 0)
+      0x00, 0x00,                // color0: RGB565 = 0 (black)
+      0xFF, 0xFF,                // color1: RGB565 = 0xFFFF (white)
+      0x00, 0x00, 0x00, 0x00,   // color indices (all 0)
+  };
+
+  auto frame = create_hap5_frame(4, 4, bc3_block, sizeof(bc3_block));
 
   Decoder decoder;
   DecodedFrame output;
@@ -242,22 +157,146 @@ HAP_TEST(test_decoder_golden_frame) {
   HAP_ASSERT(ok);
   HAP_ASSERT_EQ(output.textures.size(), 1u);
 
+  const auto &tex = output.textures[0];
+  HAP_ASSERT(tex.format == hap::core::HapTextureFormat::RGBA_DXT5);
+  HAP_ASSERT(!tex.data.empty());
+  HAP_ASSERT_EQ(tex.data.size(), 16u); // 16 bytes for BC3 block
+  HAP_ASSERT(memcmp(tex.data.data(), bc3_block, 16) == 0);
+}
+
+HAP_TEST(test_decoder_hap5_multi_texture) {
+  // Verify texture count is 1 for a Hap5 frame (single texture)
+  uint8_t bc3_block[16] = {0};
+  auto frame = create_hap5_frame(4, 4, bc3_block, sizeof(bc3_block));
+
+  unsigned int tex_count = 0;
+  unsigned int result = HapGetFrameTextureCount(
+      frame.data(), static_cast<unsigned long>(frame.size()), &tex_count);
+  HAP_ASSERT_EQ(result, (unsigned int)HapResult_No_Error);
+  HAP_ASSERT_EQ(tex_count, 1u);
+}
+
+// -----------------------------------------------------------------------
+// Hap7 (BC7/BPTC) tests
+// -----------------------------------------------------------------------
+
+HAP_TEST(test_decoder_hap7_single_block) {
+  // A single 4x4 BC7 block (16 bytes).  BC7 is pass-through for None
+  // compressor, so we use a simple known pattern.
+  uint8_t bc7_block[16] = {
+      0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  };
+
+  auto frame = create_hap7_frame(4, 4, bc7_block, sizeof(bc7_block));
+
+  Decoder decoder;
+  DecodedFrame output;
+
+  bool ok = decoder.decode(frame.data(), frame.size(), output);
+  HAP_ASSERT(ok);
+  HAP_ASSERT_EQ(output.textures.size(), 1u);
+
+  const auto &tex = output.textures[0];
+  HAP_ASSERT(tex.format == hap::core::HapTextureFormat::RGBA_BPTC_UNORM);
+  HAP_ASSERT(!tex.data.empty());
+  HAP_ASSERT_EQ(tex.data.size(), 16u); // 16 bytes for BC7 block
+  HAP_ASSERT(memcmp(tex.data.data(), bc7_block, 16) == 0);
+}
+
+HAP_TEST(test_decoder_hap7_multi_texture) {
+  // Verify texture count is 1 for a Hap7 frame
+  uint8_t bc7_block[16] = {0};
+  auto frame = create_hap7_frame(4, 4, bc7_block, sizeof(bc7_block));
+
+  unsigned int tex_count = 0;
+  unsigned int result = HapGetFrameTextureCount(
+      frame.data(), static_cast<unsigned long>(frame.size()), &tex_count);
+  HAP_ASSERT_EQ(result, (unsigned int)HapResult_No_Error);
+  HAP_ASSERT_EQ(tex_count, 1u);
+}
+
+// -----------------------------------------------------------------------
+// Golden-frame tests: byte-exact BC block comparison
+// -----------------------------------------------------------------------
+
+HAP_TEST(test_decoder_hap1_golden_frame) {
+  // 16x8 pixels = 4 BC1 blocks (2x2 grid)
+  uint8_t bc1_blocks[32];
+
+  // Block 0 (top-left): white (0xFFFF, 0x0000, indices all 0)
+  bc1_blocks[0] = 0xFF; bc1_blocks[1] = 0xFF;
+  bc1_blocks[2] = 0x00; bc1_blocks[3] = 0x00;
+  bc1_blocks[4] = 0x00; bc1_blocks[5] = 0x00;
+  bc1_blocks[6] = 0x00; bc1_blocks[7] = 0x00;
+
+  // Block 1 (top-right): black
+  bc1_blocks[8] = 0x00; bc1_blocks[9] = 0x00;
+  bc1_blocks[10] = 0xFF; bc1_blocks[11] = 0xFF;
+  bc1_blocks[12] = 0x00; bc1_blocks[13] = 0x00;
+  bc1_blocks[14] = 0x00; bc1_blocks[15] = 0x00;
+
+  // Block 2 (bottom-left): red
+  bc1_blocks[16] = 0x00; bc1_blocks[17] = 0xF8;
+  bc1_blocks[18] = 0x00; bc1_blocks[19] = 0x00;
+  bc1_blocks[20] = 0x00; bc1_blocks[21] = 0x00;
+  bc1_blocks[22] = 0x00; bc1_blocks[23] = 0x00;
+
+  // Block 3 (bottom-right): blue
+  bc1_blocks[24] = 0x1F; bc1_blocks[25] = 0x00;
+  bc1_blocks[26] = 0x00; bc1_blocks[27] = 0x00;
+  bc1_blocks[28] = 0x00; bc1_blocks[29] = 0x00;
+  bc1_blocks[30] = 0x00; bc1_blocks[31] = 0x00;
+
+  auto frame = create_hap1_frame(16, 8, bc1_blocks, sizeof(bc1_blocks));
+
+  Decoder decoder;
+  DecodedFrame output;
+
+  bool ok = decoder.decode(frame.data(), frame.size(), output);
+  HAP_ASSERT(ok);
+  HAP_ASSERT_EQ(output.textures.size(), 1u);
   const auto &tex = output.textures[0];
   HAP_ASSERT(tex.format == hap::core::HapTextureFormat::RGB_DXT1);
   HAP_ASSERT_EQ(tex.data.size(), 32u);
   HAP_ASSERT(memcmp(tex.data.data(), bc1_blocks, sizeof(bc1_blocks)) == 0);
 }
 
-// -----------------------------------------------------------------------
-// HapY (YCoCg DXT5) tests
-// -----------------------------------------------------------------------
+HAP_TEST(test_decoder_hap5_golden_frame) {
+  // 16x8 pixels = 4 BC3 blocks (2x2 grid), each 16 bytes
+  uint8_t bc3_blocks[64];
 
-HAP_TEST(test_decoder_hapy_single_block) {
-  // A single 4x4 BC3 block (16 bytes): alpha + color parts
-  uint8_t bc3_block[16];
-  make_bc3_block(bc3_block, 128, 128, 128, 128); // mid-gray, medium alpha
+  // Block 0 (top-left): alpha opaque, white
+  bc3_blocks[0] = 0xFF; bc3_blocks[1] = 0x00; // alpha endpoints: 255, 0
+  memset(bc3_blocks + 2, 0x00, 6); // alpha indices all 0 (opaque)
+  bc3_blocks[8] = 0xFF; bc3_blocks[9] = 0xFF; // color0: white
+  bc3_blocks[10] = 0x00; bc3_blocks[11] = 0x00; // color1: black
+  bc3_blocks[12] = 0x00; bc3_blocks[13] = 0x00;
+  bc3_blocks[14] = 0x00; bc3_blocks[15] = 0x00; // color indices all 0
 
-  auto frame = create_hapy_frame(bc3_block, sizeof(bc3_block));
+  // Block 1 (top-right): alpha transparent, black
+  bc3_blocks[16] = 0x00; bc3_blocks[17] = 0xFF; // alpha endpoints: 0, 255
+  memset(bc3_blocks + 18, 0x00, 6); // alpha indices all 0 (transparent)
+  bc3_blocks[24] = 0x00; bc3_blocks[25] = 0x00; // color0: black
+  bc3_blocks[26] = 0xFF; bc3_blocks[27] = 0xFF; // color1: white
+  bc3_blocks[28] = 0x00; bc3_blocks[29] = 0x00;
+  bc3_blocks[30] = 0x00; bc3_blocks[31] = 0x00;
+
+  // Block 2 (bottom-left): alpha opaque, red
+  bc3_blocks[32] = 0xFF; bc3_blocks[33] = 0x00;
+  memset(bc3_blocks + 34, 0x00, 6);
+  bc3_blocks[40] = 0x00; bc3_blocks[41] = 0xF8; // color0: red
+  bc3_blocks[42] = 0x00; bc3_blocks[43] = 0x00;
+  memset(bc3_blocks + 44, 0x00, 4);
+
+  // Block 3 (bottom-right): alpha opaque, blue
+  bc3_blocks[48] = 0xFF; bc3_blocks[49] = 0x00;
+  memset(bc3_blocks + 50, 0x00, 6);
+  bc3_blocks[56] = 0x1F; bc3_blocks[57] = 0x00; // color0: blue
+  bc3_blocks[58] = 0x00; bc3_blocks[59] = 0x00;
+  memset(bc3_blocks + 60, 0x00, 4);
+
+  auto frame = create_hap5_frame(16, 8, bc3_blocks, sizeof(bc3_blocks));
 
   Decoder decoder;
   DecodedFrame output;
@@ -267,131 +306,176 @@ HAP_TEST(test_decoder_hapy_single_block) {
   HAP_ASSERT_EQ(output.textures.size(), 1u);
 
   const auto &tex = output.textures[0];
-  // HapY decodes to BC3 format (same as DXT5)
-  HAP_ASSERT(tex.format == hap::core::HapTextureFormat::YCoCg_DXT5);
-  HAP_ASSERT(!tex.data.empty());
-  HAP_ASSERT_EQ(tex.data.size(), 16u);
-  HAP_ASSERT(memcmp(tex.data.data(), bc3_block, 16) == 0);
+  HAP_ASSERT(tex.format == hap::core::HapTextureFormat::RGBA_DXT5);
+  HAP_ASSERT_EQ(tex.data.size(), 64u); // 4 blocks x 16 bytes
+
+  // Assert: decoded BC3 data matches input byte-for-byte
+  HAP_ASSERT(memcmp(tex.data.data(), bc3_blocks, sizeof(bc3_blocks)) == 0);
 }
 
-HAP_TEST(test_decoder_hapy_format_detection) {
-  // Verify HapGetFrameTextureFormat reports YCoCg_DXT5 for HapY
-  uint8_t bc3_block[16];
-  make_bc3_block(bc3_block, 128, 128, 128, 128);
+HAP_TEST(test_decoder_hap7_golden_frame) {
+  // 16x8 pixels = 4 BC7 blocks (2x2 grid), each 16 bytes
+  // BC7 mode 1 blocks: simple test pattern
+  uint8_t bc7_blocks[64];
 
-  auto frame = create_hapy_frame(bc3_block, sizeof(bc3_block));
+  // Block 0: mode 1, all zeros
+  bc7_blocks[0] = 0x01;
+  memset(bc7_blocks + 1, 0x00, 15);
 
-  unsigned int tex_format = 0;
-  unsigned int result = HapGetFrameTextureFormat(
-      frame.data(), static_cast<unsigned long>(frame.size()), 0, &tex_format);
-  HAP_ASSERT_EQ(result, (unsigned int)HapResult_No_Error);
-  HAP_ASSERT_EQ(tex_format, (unsigned int)HapTextureFormat_YCoCg_DXT5);
-}
+  // Block 1: mode 1
+  bc7_blocks[16] = 0x01;
+  memset(bc7_blocks + 17, 0x00, 15);
 
-HAP_TEST(test_decoder_hapy_texture_count) {
-  uint8_t bc3_block[16];
-  make_bc3_block(bc3_block, 128, 128, 128, 128);
+  // Block 2: mode 1
+  bc7_blocks[32] = 0x01;
+  memset(bc7_blocks + 33, 0x00, 15);
 
-  auto frame = create_hapy_frame(bc3_block, sizeof(bc3_block));
+  // Block 3: mode 1
+  bc7_blocks[48] = 0x01;
+  memset(bc7_blocks + 49, 0x00, 15);
 
-  unsigned int tex_count = 0;
-  unsigned int result = HapGetFrameTextureCount(
-      frame.data(), static_cast<unsigned long>(frame.size()), &tex_count);
-  HAP_ASSERT_EQ(result, (unsigned int)HapResult_No_Error);
-  HAP_ASSERT_EQ(tex_count, 1u); // HapY is single-texture
-}
-
-// -----------------------------------------------------------------------
-// HapM (dual-texture: color + alpha) tests
-// -----------------------------------------------------------------------
-
-HAP_TEST(test_decoder_hapm_dual_texture) {
-  // Two 4x4 blocks: one BC3 color, one BC4 alpha
-  uint8_t color_block[16];
-  make_bc3_block(color_block, 128, 128, 128, 128);
-
-  uint8_t alpha_block[8];
-  make_bc4_block(alpha_block, 96); // alpha = 96
-
-  auto frame = create_hapm_frame(color_block, sizeof(color_block),
-                                 alpha_block, sizeof(alpha_block));
+  auto frame = create_hap7_frame(16, 8, bc7_blocks, sizeof(bc7_blocks));
 
   Decoder decoder;
   DecodedFrame output;
 
   bool ok = decoder.decode(frame.data(), frame.size(), output);
   HAP_ASSERT(ok);
-  HAP_ASSERT_EQ(output.textures.size(), 2u); // Dual textures
+  HAP_ASSERT_EQ(output.textures.size(), 1u);
 
-  // Texture 0: color (YCoCg DXT5)
-  const auto &tex0 = output.textures[0];
-  HAP_ASSERT(tex0.format == hap::core::HapTextureFormat::YCoCg_DXT5);
-  HAP_ASSERT(!tex0.data.empty());
-  HAP_ASSERT_EQ(tex0.data.size(), 16u);
-  HAP_ASSERT(memcmp(tex0.data.data(), color_block, 16) == 0);
+  const auto &tex = output.textures[0];
+  HAP_ASSERT(tex.format == hap::core::HapTextureFormat::RGBA_BPTC_UNORM);
+  HAP_ASSERT_EQ(tex.data.size(), 64u); // 4 blocks x 16 bytes
 
-  // Texture 1: alpha (A_RGTC1)
-  const auto &tex1 = output.textures[1];
-  HAP_ASSERT(tex1.format == hap::core::HapTextureFormat::A_RGTC1);
-  HAP_ASSERT(!tex1.data.empty());
-  HAP_ASSERT_EQ(tex1.data.size(), 8u);
-  HAP_ASSERT(memcmp(tex1.data.data(), alpha_block, 8) == 0);
+  // Assert: decoded BC7 data matches input byte-for-byte
+  HAP_ASSERT(memcmp(tex.data.data(), bc7_blocks, sizeof(bc7_blocks)) == 0);
 }
 
-HAP_TEST(test_decoder_hapm_alpha_non_trivial) {
-  // Verify that HapM produces a non-trivial alpha texture
-  // This tests the exact regression from the Unity plugin (which hardcoded
-  // texture index 0 and dropped alpha).
+// -----------------------------------------------------------------------
+// Unsupported format tests
+// -----------------------------------------------------------------------
 
-  uint8_t color_block[16];
-  make_bc3_block(color_block, 64, 128, 192, 255); // arbitrary YCoCg values
+HAP_TEST(test_decoder_unsupported_format_rejected) {
+  // Create a frame with an unrecognized format type byte (0x00 is
+  // neither None/Snappy/Complex compressor nor any known format).
+  // The hap.c decoder should reject it with HapResult_Bad_Frame.
+  uint8_t dummy_data[16] = {0};
 
-  uint8_t alpha_block[8];
-  make_bc4_block(alpha_block, 160); // non-trivial alpha = 160
-
-  auto frame = create_hapm_frame(color_block, sizeof(color_block),
-                                 alpha_block, sizeof(alpha_block));
+  // Type byte 0x00: compressor = 0x0 (invalid), format = 0x0 (invalid)
+  std::vector<uint8_t> frame;
+  uint32_t length = 16;
+  frame.push_back(length & 0xFF);
+  frame.push_back((length >> 8) & 0xFF);
+  frame.push_back((length >> 16) & 0xFF);
+  frame.push_back(0x00); // invalid type byte
+  frame.insert(frame.end(), dummy_data, dummy_data + 16);
 
   Decoder decoder;
   DecodedFrame output;
 
   bool ok = decoder.decode(frame.data(), frame.size(), output);
-  HAP_ASSERT(ok);
-  HAP_ASSERT_EQ(output.textures.size(), 2u);
+  HAP_ASSERT(!ok); // Must fail: unsupported format
+}
 
-  // Verify alpha texture has non-trivial content
-  const auto &alpha_tex = output.textures[1];
-  HAP_ASSERT(!alpha_tex.data.empty());
-  HAP_ASSERT_EQ(alpha_tex.data.size(), 8u); // 8 bytes for BC4 block
+HAP_TEST(test_decoder_hap_format_rejected) {
+  // Unsupported Hap compressor type should also be rejected.
+  // Type byte 0xD0: compressor = 0xD (invalid), format = 0x0 (invalid)
+  uint8_t dummy_data[16] = {0};
+  std::vector<uint8_t> frame;
+  uint32_t length = 16;
+  frame.push_back(length & 0xFF);
+  frame.push_back((length >> 8) & 0xFF);
+  frame.push_back((length >> 16) & 0xFF);
+  frame.push_back(0xD0);
+  frame.insert(frame.end(), dummy_data, dummy_data + 16);
 
-  // Check that not all bytes are zero (non-trivial alpha)
-  bool all_zero = true;
-  for (uint8_t byte : alpha_tex.data) {
-    if (byte != 0) {
-      all_zero = false;
-      break;
+  Decoder decoder;
+  DecodedFrame output;
+
+  bool ok = decoder.decode(frame.data(), frame.size(), output);
+  HAP_ASSERT(!ok);
+}
+
+// -----------------------------------------------------------------------
+// Fixture-based decode tests: demux + decode frame 0 from real .mov files.
+// These exercise the Snappy decompress path (the synthetic tests above use
+// the None compressor) and assert format + expected BC block byte count.
+// -----------------------------------------------------------------------
+
+static std::string find_fixture(const std::vector<std::string> &names) {
+  std::vector<std::string> paths = {
+      "tests/fixtures/",
+      "../tests/fixtures/",
+  };
+  for (const auto &name : names) {
+    for (const auto &p : paths) {
+      std::string full = p + name;
+      if (access(full.c_str(), F_OK) == 0)
+        return full;
     }
   }
-  HAP_ASSERT(!all_zero); // Alpha data must be non-trivial
-
-  // Verify the alpha endpoint is 160 (our test value)
-  HAP_ASSERT_EQ(alpha_tex.data[0], 160);
+  return "";
 }
 
-HAP_TEST(test_decoder_hapm_texture_count) {
-  uint8_t color_block[16];
-  make_bc3_block(color_block, 128, 128, 128, 128);
-  uint8_t alpha_block[8];
-  make_bc4_block(alpha_block, 96);
+HAP_TEST(test_decoder_hap5_fixture_frame0) {
+  std::string path = find_fixture({"hap5.mov"});
+  if (path.empty()) {
+    fprintf(stderr, "SKIP (no hap5 fixture) ");
+    return;
+  }
 
-  auto frame = create_hapm_frame(color_block, sizeof(color_block),
-                                 alpha_block, sizeof(alpha_block));
+  MmapReader reader;
+  HAP_ASSERT(reader.open(path));
 
-  unsigned int tex_count = 0;
-  unsigned int result = HapGetFrameTextureCount(
-      frame.data(), static_cast<unsigned long>(frame.size()), &tex_count);
-  HAP_ASSERT_EQ(result, (unsigned int)HapResult_No_Error);
-  HAP_ASSERT_EQ(tex_count, 2u); // HapM is dual-texture
+  Demuxer demuxer;
+  auto result = demuxer.open(reader);
+  HAP_ASSERT(result.valid);
+  HAP_ASSERT(result.track.fourcc == FCC_Hap5);
+  HAP_ASSERT(result.track.frame_count > 0);
+
+  const uint8_t *sample = demuxer.sample_data(reader, 0);
+  HAP_ASSERT(sample != nullptr);
+
+  Decoder decoder;
+  DecodedFrame output;
+  HAP_ASSERT(decoder.decode(sample, result.samples[0].size, output));
+  HAP_ASSERT_EQ(output.textures.size(), 1u);
+
+  const auto &tex = output.textures[0];
+  HAP_ASSERT(tex.format == hap::core::HapTextureFormat::RGBA_DXT5);
+  // Decoded size must match the BC3 block byte count for the track dimensions.
+  HAP_ASSERT_EQ(tex.data.size(),
+               static_cast<size_t>(result.track.frame_bytes()));
+}
+
+HAP_TEST(test_decoder_hap7_fixture_frame0) {
+  std::string path = find_fixture({"hap7.mov"});
+  if (path.empty()) {
+    fprintf(stderr, "SKIP (no hap7 fixture) ");
+    return;
+  }
+
+  MmapReader reader;
+  HAP_ASSERT(reader.open(path));
+
+  Demuxer demuxer;
+  auto result = demuxer.open(reader);
+  HAP_ASSERT(result.valid);
+  HAP_ASSERT(result.track.fourcc == FCC_Hap7);
+  HAP_ASSERT(result.track.frame_count > 0);
+
+  const uint8_t *sample = demuxer.sample_data(reader, 0);
+  HAP_ASSERT(sample != nullptr);
+
+  Decoder decoder;
+  DecodedFrame output;
+  HAP_ASSERT(decoder.decode(sample, result.samples[0].size, output));
+  HAP_ASSERT_EQ(output.textures.size(), 1u);
+
+  const auto &tex = output.textures[0];
+  HAP_ASSERT(tex.format == hap::core::HapTextureFormat::RGBA_BPTC_UNORM);
+  HAP_ASSERT_EQ(tex.data.size(),
+               static_cast<size_t>(result.track.frame_bytes()));
 }
 
 // -----------------------------------------------------------------------

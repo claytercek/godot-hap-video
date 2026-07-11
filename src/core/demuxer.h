@@ -51,15 +51,16 @@ public:
   /// Returns nullptr if index is out of range.
   const uint8_t *sample_data(const MmapReader &reader, uint32_t index) const;
 
+  /// Parse the stsd box to extract FourCC and dimensions.
+  /// Static so it can be tested without opening a file.
+  static StsdResult parse_stsd(const uint8_t *data, uint32_t size, VideoFormat &out_format);
+
 private:
   MP4D_demux_t *mp4_ = nullptr; // Owned heap-allocated minimp4 context
   bool valid_ = false;
   VideoTrackInfo track_;
   std::vector<SampleEntry> samples_;
   uint64_t file_size_ = 0;
-
-  /// Parse the stsd box to extract FourCC and dimensions.
-  bool parse_stsd(const uint8_t *data, uint32_t size, VideoFormat &out_format);
 
   /// Validate all sample offsets/sizes against the file size.
   bool validate_samples(const std::vector<SampleEntry> &samples,
