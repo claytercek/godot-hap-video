@@ -15,8 +15,14 @@ namespace core {
 /// with correct multi-texture handling (fixing the reference Unity plugin's
 /// hardcoded index=0 bug).
 ///
-/// For the tracer bullet, decode is synchronous with no thread pool.
-/// The callback always dispatches work inline (single-threaded).
+/// Chunked frames (Complex compressor) are decoded in parallel using the
+/// shared InnerThreadPool, which auto-derives its thread count from
+/// hardware_concurrency per the spec's formula. The HapDecode callback
+/// is invoked once per multi-chunk texture and returns only when all
+/// chunks are complete. Single-chunk textures bypass the callback entirely.
+///
+/// The decoder does not copy sample data — it slices directly from the
+/// caller's input buffer (which is typically the mmap region).
 class Decoder {
 public:
   Decoder() = default;

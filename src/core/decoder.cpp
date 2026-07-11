@@ -1,24 +1,13 @@
 #include "decoder.h"
 
+#include "thread_pool.h"
+
 #include "hap.h"
 
 #include <cstring>
 
 namespace hap {
 namespace core {
-
-// -----------------------------------------------------------------------
-// Synchronous decode callback: dispatches work inline (single-threaded).
-// For the tracer bullet, we don't use a thread pool — just call the work
-// function sequentially. The callback is invoked only for multi-chunk
-// frames (complex compressor).
-// -----------------------------------------------------------------------
-static void sync_decode_callback(HapDecodeWorkFunction function, void *p,
-                                  unsigned int count, void * /*info*/) {
-  for (unsigned int i = 0; i < count; i++) {
-    function(p, i);
-  }
-}
 
 bool Decoder::decode(const uint8_t *input, size_t input_size,
                      DecodedFrame &output) {
@@ -61,7 +50,7 @@ bool Decoder::decode(const uint8_t *input, size_t input_size,
 
     unsigned long bytes_used = 0;
     result = HapDecode(input, static_cast<unsigned long>(input_size), i,
-                       sync_decode_callback, nullptr, temp_buffer_.data(),
+                       hap_inner_decode_callback, nullptr, temp_buffer_.data(),
                        static_cast<unsigned long>(temp_buffer_.size()),
                        &bytes_used, &texture_format);
     if (result != HapResult_No_Error) {
@@ -71,7 +60,7 @@ bool Decoder::decode(const uint8_t *input, size_t input_size,
         temp_buffer_.resize(max_size);
         result = HapDecode(
             input, static_cast<unsigned long>(input_size), i,
-            sync_decode_callback, nullptr, temp_buffer_.data(),
+            hap_inner_decode_callback, nullptr, temp_buffer_.data(),
             static_cast<unsigned long>(temp_buffer_.size()), &bytes_used,
             &texture_format);
         if (result != HapResult_No_Error) {

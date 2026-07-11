@@ -173,6 +173,7 @@ if ARGUMENTS.get("build_tests", "0") == "1":
         core_objects = [
             "build/src/core/demuxer.os",
             "build/src/core/decoder.os",
+            "build/src/core/thread_pool.os",
             "build/src/core/mmap_reader.os",
         ]
         test_bin = test_env.Program(

@@ -10,13 +10,16 @@
 #include "core/demuxer.h"
 #include "core/hap_frame.h"
 #include "core/mmap_reader.h"
+#include "core/thread_pool.h"
 
 #include "hap.h"
 #include "test.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <unistd.h>
 
 using namespace hap::core;
@@ -476,6 +479,334 @@ HAP_TEST(test_decoder_hap7_fixture_frame0) {
   HAP_ASSERT(tex.format == hap::core::HapTextureFormat::RGBA_BPTC_UNORM);
   HAP_ASSERT_EQ(tex.data.size(),
                static_cast<size_t>(result.track.frame_bytes()));
+}
+
+// -----------------------------------------------------------------------
+// Chunked frame helpers
+//
+// We use HapEncode (from the vendored hap.c) to create valid chunked frames
+// and a manual builder for unchunked frames. This way we test the actual
+// hap.c encode path as well as our decode path.
+// -----------------------------------------------------------------------
+
+/// Create an unchunked (None-compressed) Hap1 frame from raw BC1 data.
+static std::vector<uint8_t> create_unchunked_hap1(const uint8_t *bc1_data,
+                                                   size_t bc1_size) {
+  std::vector<uint8_t> frame;
+  uint32_t length = static_cast<uint32_t>(bc1_size);
+  frame.push_back(length & 0xFF);
+  frame.push_back((length >> 8) & 0xFF);
+  frame.push_back((length >> 16) & 0xFF);
+  frame.push_back(0xAB); // None|DXT1
+  frame.insert(frame.end(), bc1_data, bc1_data + bc1_size);
+  return frame;
+}
+
+/// Create a chunked (Complex/Snappy) frame from raw texture data.
+/// Uses HapEncode with the given number of chunks and texture format.
+static std::vector<uint8_t> create_chunked_frame(const uint8_t *tex_data,
+                                                  size_t tex_size,
+                                                  unsigned int chunk_count,
+                                                  unsigned int texture_format,
+                                                  unsigned int compressor) {
+  // Use HapMaxEncodedLength for accurate buffer sizing
+  unsigned long lengths[] = {static_cast<unsigned long>(tex_size)};
+  unsigned int tex_fmts[] = {texture_format};
+  unsigned int chunk_counts[] = {chunk_count};
+  unsigned long max_size = HapMaxEncodedLength(1, lengths, tex_fmts,
+                                                 chunk_counts);
+  if (max_size == 0) {
+    return {};
+  }
+
+  std::vector<uint8_t> output(max_size, 0);
+  unsigned long bytes_used = 0;
+  const void *input_bufs[] = {tex_data};
+  unsigned long input_sizes[] = {static_cast<unsigned long>(tex_size)};
+  unsigned int compressors[] = {compressor};
+
+  unsigned int result = HapEncode(1, input_bufs, input_sizes, tex_fmts,
+                                   compressors, chunk_counts,
+                                   output.data(), max_size, &bytes_used);
+  if (result != HapResult_No_Error) {
+    return {};
+  }
+  output.resize(bytes_used);
+  return output;
+}
+
+// -----------------------------------------------------------------------
+// Chunked decode tests
+//
+// Core assertion: chunking is transport — the decoded output of a chunked
+// frame must be byte-for-byte identical to the output of an unchunked frame
+// when both encode the same raw texture data.
+// -----------------------------------------------------------------------
+
+HAP_TEST(test_decoder_chunked_bc1_byte_identical) {
+  // Create raw BC1 data: 64x32 pixels = 128 BC1 blocks (1024 bytes)
+  // Large enough for HapEncode to produce a Complex frame.
+  uint8_t bc1_blocks[1024];
+  for (size_t i = 0; i < sizeof(bc1_blocks); i += 8) {
+    // Each block: alternating pattern that compresses well
+    bc1_blocks[i + 0] = 0xFF; bc1_blocks[i + 1] = 0xFF; // color0: white
+    bc1_blocks[i + 2] = 0x00; bc1_blocks[i + 3] = 0x00; // color1: black
+    bc1_blocks[i + 4] = 0x00; bc1_blocks[i + 5] = 0x00; // indices: all 0
+    bc1_blocks[i + 6] = 0x00; bc1_blocks[i + 7] = 0x00;
+  }
+
+  // Create unchunked frame (None compressor)
+  auto unchunked = create_unchunked_hap1(bc1_blocks, sizeof(bc1_blocks));
+  HAP_ASSERT(!unchunked.empty());
+
+  // Create chunked frame (Snappy, 4 chunks)
+  auto chunked = create_chunked_frame(bc1_blocks, sizeof(bc1_blocks), 4,
+                                       HapTextureFormat_RGB_DXT1,
+                                       HapCompressorSnappy);
+  HAP_ASSERT(!chunked.empty());
+
+  // Verify the chunked frame is actually Complex (0xCB header type)
+  HAP_ASSERT_EQ(chunked.size() >= 4u, true);
+  unsigned int chunked_type = static_cast<unsigned char>(chunked[3]);
+  HAP_ASSERT_EQ(chunked_type, 0xCBu); // Complex|DXT1
+
+  // Verify chunk count is 4
+  int chunk_count = 0;
+  unsigned int result = HapGetFrameTextureChunkCount(
+      chunked.data(), static_cast<unsigned long>(chunked.size()), 0,
+      &chunk_count);
+  HAP_ASSERT_EQ(result, (unsigned int)HapResult_No_Error);
+  HAP_ASSERT_EQ(chunk_count, 4);
+
+  // Decode both frames
+  Decoder decoder;
+  DecodedFrame output_unchunked;
+  DecodedFrame output_chunked;
+
+  bool ok = decoder.decode(unchunked.data(), unchunked.size(), output_unchunked);
+  HAP_ASSERT(ok);
+
+  ok = decoder.decode(chunked.data(), chunked.size(), output_chunked);
+  HAP_ASSERT(ok);
+
+  // Both should decode to 1 texture
+  HAP_ASSERT_EQ(output_unchunked.textures.size(), 1u);
+  HAP_ASSERT_EQ(output_chunked.textures.size(), 1u);
+
+  // Format should match
+  HAP_ASSERT(output_unchunked.textures[0].format ==
+             hap::core::HapTextureFormat::RGB_DXT1);
+  HAP_ASSERT(output_chunked.textures[0].format ==
+             hap::core::HapTextureFormat::RGB_DXT1);
+
+  // Byte-level identity: chunking is transport
+  HAP_ASSERT_EQ(output_unchunked.textures[0].data.size(),
+                output_chunked.textures[0].data.size());
+  HAP_ASSERT(memcmp(output_unchunked.textures[0].data.data(),
+                    output_chunked.textures[0].data.data(),
+                    output_unchunked.textures[0].data.size()) == 0);
+}
+
+HAP_TEST(test_decoder_chunked_hapy_byte_identical) {
+  // Create raw YCoCg-DXT5 data (BC3 format): 64x32 pixels = 128 BC3 blocks
+  // 128 blocks × 16 bytes = 2048 bytes. Large enough for Complex compression.
+  uint8_t bc3_blocks[2048];
+  std::memset(bc3_blocks, 0, sizeof(bc3_blocks));
+
+  // Fill with a simple pattern: set alpha to opaque and colors to white
+  for (size_t i = 0; i < sizeof(bc3_blocks); i += 16) {
+    // Alpha endpoints: opaque
+    bc3_blocks[i + 0] = 0xFF; bc3_blocks[i + 1] = 0xFF;
+    // Color endpoints: white (RGB565 = 0xFFFF)
+    bc3_blocks[i + 8] = 0xFF; bc3_blocks[i + 9] = 0xFF;
+  }
+
+  // Encode unchunked via HapEncode (1 chunk, Snappy)
+  auto unchunked = create_chunked_frame(bc3_blocks, sizeof(bc3_blocks), 1,
+                                         HapTextureFormat_YCoCg_DXT5,
+                                         HapCompressorSnappy);
+  HAP_ASSERT(!unchunked.empty());
+
+  // Encode chunked via HapEncode (4 chunks, Snappy)
+  auto chunked = create_chunked_frame(bc3_blocks, sizeof(bc3_blocks), 4,
+                                       HapTextureFormat_YCoCg_DXT5,
+                                       HapCompressorSnappy);
+  HAP_ASSERT(!chunked.empty());
+
+  // Verify it's Complex (0xCF = Complex|YCoCg-DXT5)
+  HAP_ASSERT_EQ(chunked.size() >= 4u, true);
+  HAP_ASSERT_EQ(static_cast<unsigned char>(chunked[3]), 0xCFu);
+
+  // Verify chunk count
+  int chunk_count = 0;
+  unsigned int result = HapGetFrameTextureChunkCount(
+      chunked.data(), static_cast<unsigned long>(chunked.size()),
+      0, &chunk_count);
+  HAP_ASSERT_EQ(result, (unsigned int)HapResult_No_Error);
+  HAP_ASSERT(chunk_count >= 2);
+
+  // Decode both
+  Decoder decoder;
+  DecodedFrame out_unc, out_chk;
+
+  HAP_ASSERT(decoder.decode(unchunked.data(), unchunked.size(), out_unc));
+  HAP_ASSERT(decoder.decode(chunked.data(), chunked.size(), out_chk));
+
+  // Both should decode to 1 texture
+  HAP_ASSERT_EQ(out_unc.textures.size(), 1u);
+  HAP_ASSERT_EQ(out_chk.textures.size(), 1u);
+
+  // Byte-level identity
+  HAP_ASSERT_EQ(out_unc.textures[0].data.size(),
+                out_chk.textures[0].data.size());
+  HAP_ASSERT(memcmp(out_unc.textures[0].data.data(),
+                    out_chk.textures[0].data.data(),
+                    out_unc.textures[0].data.size()) == 0);
+}
+
+// -----------------------------------------------------------------------
+// Thread pool unit tests
+// -----------------------------------------------------------------------
+
+struct WorkItem {
+  std::atomic<unsigned int> call_count{0};
+};
+
+static void test_work_function(void *p, unsigned int /*index*/) {
+  auto *item = static_cast<WorkItem *>(p);
+  item->call_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+HAP_TEST(test_thread_pool_basic) {
+  auto &pool = InnerThreadPool::instance();
+
+  // The pool should have at least 1 worker
+  HAP_ASSERT(pool.worker_count() >= 1);
+
+  // Verify the thread count matches the formula
+  // max(1, hardware_concurrency - 3)
+  unsigned int hw = std::thread::hardware_concurrency();
+  unsigned int expected = (hw > 3) ? (hw - 3) : 1;
+  HAP_ASSERT_EQ(pool.worker_count(), expected);
+}
+
+HAP_TEST(test_thread_pool_no_workers_if_single_item) {
+  // A single work item should complete immediately via the calling thread
+  auto &pool = InnerThreadPool::instance();
+
+  WorkItem item;
+  pool.execute(test_work_function, &item, 1);
+
+  HAP_ASSERT_EQ(item.call_count.load(), 1u);
+}
+
+HAP_TEST(test_thread_pool_multi_work_items) {
+  auto &pool = InnerThreadPool::instance();
+
+  WorkItem item;
+  const unsigned int kCount = 100;
+
+  pool.execute(test_work_function, &item, kCount);
+
+  // All work items must have been executed
+  HAP_ASSERT_EQ(item.call_count.load(), kCount);
+}
+
+HAP_TEST(test_thread_pool_no_remaining_state) {
+  // Execute multiple batches to ensure no state leaks between calls
+  auto &pool = InnerThreadPool::instance();
+
+  WorkItem item1;
+  WorkItem item2;
+
+  pool.execute(test_work_function, &item1, 5);
+  HAP_ASSERT_EQ(item1.call_count.load(), 5u);
+
+  pool.execute(test_work_function, &item2, 7);
+  HAP_ASSERT_EQ(item2.call_count.load(), 7u);
+
+  // item1 should not have been called again
+  HAP_ASSERT_EQ(item1.call_count.load(), 5u);
+}
+
+HAP_TEST(test_thread_pool_large_count) {
+  auto &pool = InnerThreadPool::instance();
+
+  // Use a count that exceeds the number of workers to test partitioning
+  const unsigned int kCount = 1000;
+  WorkItem item;
+
+  pool.execute(test_work_function, &item, kCount);
+  HAP_ASSERT_EQ(item.call_count.load(), kCount);
+}
+
+// -----------------------------------------------------------------------
+// Callback contract: verify HapDecode respects the single-chunk contract
+// -----------------------------------------------------------------------
+
+static int callback_invocation_count = 0;
+
+static void tracking_callback(HapDecodeWorkFunction function, void *p,
+                               unsigned int count, void *info) {
+  callback_invocation_count++;
+  // Forward to the inner pool for proper multi-threaded decode
+  hap_inner_decode_callback(function, p, count, info);
+}
+
+static void reset_callback_count() { callback_invocation_count = 0; }
+
+HAP_TEST(test_decoder_callback_not_invoked_for_single_chunk) {
+  // Create an unchunked frame and decode it with our tracking callback
+  uint8_t bc1_block[8] = {0xFF, 0xFF, 0x00, 0x00,
+                           0x00, 0x00, 0x00, 0x00};
+  auto frame = create_unchunked_hap1(bc1_block, sizeof(bc1_block));
+
+  // Decode with the tracking callback via HapDecode directly
+  unsigned int tex_format = 0;
+  unsigned long bytes_used = 0;
+  uint8_t output[1024];
+
+  reset_callback_count();
+
+  unsigned int result = HapDecode(
+      frame.data(), static_cast<unsigned long>(frame.size()), 0,
+      tracking_callback, nullptr, output, sizeof(output),
+      &bytes_used, &tex_format);
+
+  HAP_ASSERT_EQ(result, (unsigned int)HapResult_No_Error);
+
+  // The callback must NOT have been invoked for a single-chunk frame
+  HAP_ASSERT_EQ(callback_invocation_count, 0);
+}
+
+HAP_TEST(test_decoder_callback_invoked_for_multi_chunk) {
+  // Create raw BC1 data (1024 bytes = 128 BC1 blocks), large enough
+  // for HapEncode to produce a Complex (chunked) frame.
+  uint8_t bc1_data[1024];
+  std::memset(bc1_data, 0, sizeof(bc1_data));
+
+  // Encode with 4 chunks
+  auto chunked = create_chunked_frame(bc1_data, sizeof(bc1_data), 4,
+                                       HapTextureFormat_RGB_DXT1,
+                                       HapCompressorSnappy);
+  HAP_ASSERT(!chunked.empty());
+
+  // Decode with the tracking callback via HapDecode directly
+  unsigned int tex_format = 0;
+  unsigned long bytes_used = 0;
+  uint8_t output[4096];
+
+  reset_callback_count();
+
+  unsigned int result = HapDecode(
+      chunked.data(), static_cast<unsigned long>(chunked.size()), 0,
+      tracking_callback, nullptr, output, sizeof(output),
+      &bytes_used, &tex_format);
+
+  HAP_ASSERT_EQ(result, (unsigned int)HapResult_No_Error);
+
+  // The callback MUST have been invoked exactly once for a multi-chunk frame
+  HAP_ASSERT_EQ(callback_invocation_count, 1);
 }
 
 // -----------------------------------------------------------------------

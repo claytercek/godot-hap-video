@@ -42,8 +42,14 @@ ffmpeg -y $SOURCE_OPTS -c:v hap -format hap_alpha -compressor snappy -chunks 1 "
 echo "Generating hapy fixture..."
 ffmpeg -y $SOURCE_OPTS -c:v hap -format hap_q -compressor snappy -chunks 1 "$OUTDIR/hapy.mov"
 
-echo "Generating hap1_chunked fixture..."
+echo "Generating hap1_chunked fixture (4 chunks)..."
 ffmpeg -y $SOURCE_OPTS -c:v hap -format hap -compressor snappy -chunks 4 "$OUTDIR/hap1_chunked.mov"
+
+echo "Generating hapy_chunked fixture (4 chunks)..."
+ffmpeg -y $SOURCE_OPTS -c:v hap -format hap_q -compressor snappy -chunks 4 "$OUTDIR/hapy_chunked.mov"
+
+echo "Generating hap5_chunked fixture (4 chunks)..."
+ffmpeg -y $SOURCE_OPTS -c:v hap -format hap_alpha -compressor snappy -chunks 4 "$OUTDIR/hap5_chunked.mov"
 
 echo "Generating hap1_audio fixture..."
 ffmpeg -y -f lavfi -i testsrc2=size=${WIDTH}x${HEIGHT}:rate=${FPS}:duration=${DURATION} \
