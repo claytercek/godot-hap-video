@@ -66,6 +66,13 @@ constexpr FourCC FCC_HapY{'H', 'a', 'p', 'Y'}; // Hap Q (YCoCg-DXT5)
 constexpr FourCC FCC_HapM{'H', 'a', 'p', 'M'}; // Hap Q Alpha (dual texture)
 constexpr FourCC FCC_Hap7{'H', 'a', 'p', '7'}; // Hap R (BC7/BPTC)
 
+/// Parsed track dimensions and FourCC from stsd.
+struct VideoFormat {
+  FourCC fourcc;
+  uint32_t width = 0;
+  uint32_t height = 0;
+};
+
 /// Video track metadata extracted from the MOV container.
 struct VideoTrackInfo {
   FourCC fourcc;             // The stsd sample entry FourCC

@@ -122,7 +122,7 @@ static bool find_trak_at(const uint8_t *file_data, uint64_t file_size,
   unsigned int count = 0;
   return walk_children(
       file_data, file_size, moov, [&](const BoxHeader &child) -> bool {
-        if (child.type == 0x7472616B) { // 'trak'
+        if (child.type == FourCC('t','r','a','k').value) {
           if (count == track_index) {
             out_trak = child;
             return true;
@@ -138,7 +138,7 @@ static bool find_stsd_in_trak(const uint8_t *file_data, uint64_t file_size,
   BoxHeader mdia;
   if (!walk_children(file_data, file_size, trak,
                      [&](const BoxHeader &child) -> bool {
-                       if (child.type == 0x6D646961) { // 'mdia'
+                       if (child.type == FourCC('m','d','i','a').value) {
                          mdia = child;
                          return true;
                        }
@@ -149,7 +149,7 @@ static bool find_stsd_in_trak(const uint8_t *file_data, uint64_t file_size,
   BoxHeader minf;
   if (!walk_children(file_data, file_size, mdia,
                      [&](const BoxHeader &child) -> bool {
-                       if (child.type == 0x6D696E66) { // 'minf'
+                       if (child.type == FourCC('m','i','n','f').value) {
                          minf = child;
                          return true;
                        }
@@ -160,7 +160,7 @@ static bool find_stsd_in_trak(const uint8_t *file_data, uint64_t file_size,
   BoxHeader stbl;
   if (!walk_children(file_data, file_size, minf,
                      [&](const BoxHeader &child) -> bool {
-                       if (child.type == 0x7374626C) { // 'stbl'
+                       if (child.type == FourCC('s','t','b','l').value) {
                          stbl = child;
                          return true;
                        }
@@ -170,7 +170,7 @@ static bool find_stsd_in_trak(const uint8_t *file_data, uint64_t file_size,
 
   return walk_children(file_data, file_size, stbl,
                        [&](const BoxHeader &child) -> bool {
-                         if (child.type == 0x73747364) { // 'stsd'
+                         if (child.type == FourCC('s','t','s','d').value) {
                            out_stsd = child;
                            return true;
                          }
@@ -188,8 +188,7 @@ static bool find_stsd_in_trak(const uint8_t *file_data, uint64_t file_size,
 //   pre_defined(2) + reserved(2) + pre_defined(12) + width(2) + height(2)
 // -----------------------------------------------------------------------
 bool Demuxer::parse_stsd(const uint8_t *data, uint32_t size,
-                         FourCC &out_fourcc, uint32_t &out_width,
-                         uint32_t &out_height) {
+                         VideoFormat &out_format) {
   if (size < 8)
     return false;
 
@@ -212,9 +211,9 @@ bool Demuxer::parse_stsd(const uint8_t *data, uint32_t size,
       // pre_defined(2) + reserved(2) + pre_defined(12) = 32 bytes
       uint32_t dim_offset = offset + 32;
       if (dim_offset + 4 <= size) {
-        out_width = read_u16_be(data + dim_offset);
-        out_height = read_u16_be(data + dim_offset + 2);
-        out_fourcc = fourcc;
+        out_format.width = read_u16_be(data + dim_offset);
+        out_format.height = read_u16_be(data + dim_offset + 2);
+        out_format.fourcc = fourcc;
         return true;
       }
     }
@@ -251,11 +250,16 @@ bool Demuxer::validate_samples(const std::vector<SampleEntry> &samples,
 // -----------------------------------------------------------------------
 // Destructor / Move
 // -----------------------------------------------------------------------
-Demuxer::~Demuxer() {
+void Demuxer::cleanup_mp4() {
   if (mp4_) {
     MP4D_close(mp4_);
     delete mp4_;
+    mp4_ = nullptr;
   }
+}
+
+Demuxer::~Demuxer() {
+  cleanup_mp4();
 }
 
 Demuxer::Demuxer(Demuxer &&other) noexcept
@@ -267,10 +271,7 @@ Demuxer::Demuxer(Demuxer &&other) noexcept
 
 Demuxer &Demuxer::operator=(Demuxer &&other) noexcept {
   if (this != &other) {
-    if (mp4_) {
-      MP4D_close(mp4_);
-      delete mp4_;
-    }
+    cleanup_mp4();
     mp4_ = other.mp4_;
     valid_ = other.valid_;
     track_ = other.track_;
@@ -306,8 +307,7 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
 
   if (!MP4D_open(mp4_, minimp4_read, &read_ctx, read_ctx.size)) {
     result.error_message = "Failed to open/parse MOV file";
-    delete mp4_;
-    mp4_ = nullptr;
+    cleanup_mp4();
     return result;
   }
 
@@ -322,7 +322,7 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
     BoxHeader hdr;
     if (!read_box_header(file_data, file_size, pos, hdr))
       break;
-    if (hdr.type == 0x6D6F6F76) { // 'moov'
+    if (hdr.type == FourCC('m','o','o','v').value) {
       moov = hdr;
       found_moov = true;
       break;
@@ -334,9 +334,7 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
 
   if (!found_moov) {
     result.error_message = "No moov box found in MOV file";
-    MP4D_close(mp4_);
-    delete mp4_;
-    mp4_ = nullptr;
+    cleanup_mp4();
     return result;
   }
 
@@ -345,9 +343,7 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
   // find and parse its stsd box to check for Hap FourCCs.
   unsigned int hap_track_index = 0;
   bool found_hap = false;
-  FourCC found_fourcc;
-  uint32_t found_width = 0;
-  uint32_t found_height = 0;
+  VideoFormat hap_format;
 
   for (unsigned int t = 0; t < mp4_->track_count; t++) {
     BoxHeader trak;
@@ -358,8 +354,7 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
     if (!find_stsd_in_trak(file_data, file_size, trak, stsd))
       continue;
 
-    if (parse_stsd(file_data + stsd.data_pos, stsd.data_size, found_fourcc,
-                   found_width, found_height)) {
+    if (parse_stsd(file_data + stsd.data_pos, stsd.data_size, hap_format)) {
       hap_track_index = t;
       found_hap = true;
       break;
@@ -368,9 +363,7 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
 
   if (!found_hap) {
     result.error_message = "No Hap video track found in file";
-    MP4D_close(mp4_);
-    delete mp4_;
-    mp4_ = nullptr;
+    cleanup_mp4();
     return result;
   }
 
@@ -380,9 +373,7 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
 
   if (num_samples == 0) {
     result.error_message = "Hap video track has zero samples";
-    MP4D_close(mp4_);
-    delete mp4_;
-    mp4_ = nullptr;
+    cleanup_mp4();
     return result;
   }
 
@@ -405,16 +396,14 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
   std::string validation_error;
   if (!validate_samples(samples_, file_size_, validation_error)) {
     result.error_message = validation_error;
-    MP4D_close(mp4_);
-    delete mp4_;
-    mp4_ = nullptr;
+    cleanup_mp4();
     return result;
   }
 
   // Populate track info
-  track_.fourcc = found_fourcc;
-  track_.width = found_width;
-  track_.height = found_height;
+  track_.fourcc = hap_format.fourcc;
+  track_.width = hap_format.width;
+  track_.height = hap_format.height;
   track_.frame_count = num_samples;
   track_.timescale = mp4_track.timescale;
 

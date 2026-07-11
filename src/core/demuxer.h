@@ -59,12 +59,14 @@ private:
   uint64_t file_size_ = 0;
 
   /// Parse the stsd box to extract FourCC and dimensions.
-  bool parse_stsd(const uint8_t *data, uint32_t size, FourCC &out_fourcc,
-                  uint32_t &out_width, uint32_t &out_height);
+  bool parse_stsd(const uint8_t *data, uint32_t size, VideoFormat &out_format);
 
   /// Validate all sample offsets/sizes against the file size.
   bool validate_samples(const std::vector<SampleEntry> &samples,
                         uint64_t file_size, std::string &error);
+
+  /// Clean up the minimp4 context.
+  void cleanup_mp4();
 };
 
 } // namespace core

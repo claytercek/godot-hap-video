@@ -116,6 +116,61 @@ HAP_TEST(test_decoder_hap1_multi_texture) {
   HAP_ASSERT_EQ(tex_count, 1u);
 }
 
+HAP_TEST(test_decoder_golden_frame) {
+  // Create a BC1 checkerboard pattern: 16x8 pixels = 4 BC1 blocks (2x2 grid)
+  // Each block is 8 bytes: 2 endpoints (RGB565) + 4 bytes indices
+  
+  uint8_t bc1_blocks[32];
+  
+  // Block 0 (top-left 4x4): white
+  // Endpoints: 0xFFFF (white), 0x0000 (black)
+  // Indices: all 0 (select first color = white)
+  bc1_blocks[0] = 0xFF; bc1_blocks[1] = 0xFF; // color0: white (RGB565)
+  bc1_blocks[2] = 0x00; bc1_blocks[3] = 0x00; // color1: black (RGB565)
+  bc1_blocks[4] = 0x00; bc1_blocks[5] = 0x00; // indices all 0
+  bc1_blocks[6] = 0x00; bc1_blocks[7] = 0x00;
+  
+  // Block 1 (top-right 4x4): black 
+  // Endpoints: 0x0000 (black), 0xFFFF (white)
+  // Indices: all 0 (select first color = black)
+  bc1_blocks[8] = 0x00; bc1_blocks[9] = 0x00; // color0: black
+  bc1_blocks[10] = 0xFF; bc1_blocks[11] = 0xFF; // color1: white
+  bc1_blocks[12] = 0x00; bc1_blocks[13] = 0x00; // indices all 0
+  bc1_blocks[14] = 0x00; bc1_blocks[15] = 0x00;
+  
+  // Block 2 (bottom-left 4x4): red
+  // RGB565 red = 0xF800, stored little-endian
+  bc1_blocks[16] = 0x00; bc1_blocks[17] = 0xF8; // color0: red
+  bc1_blocks[18] = 0x00; bc1_blocks[19] = 0x00; // color1: black
+  bc1_blocks[20] = 0x00; bc1_blocks[21] = 0x00; // indices all 0
+  bc1_blocks[22] = 0x00; bc1_blocks[23] = 0x00;
+  
+  // Block 3 (bottom-right 4x4): blue
+  // RGB565 blue = 0x001F, stored little-endian
+  bc1_blocks[24] = 0x1F; bc1_blocks[25] = 0x00; // color0: blue
+  bc1_blocks[26] = 0x00; bc1_blocks[27] = 0x00; // color1: black
+  bc1_blocks[28] = 0x00; bc1_blocks[29] = 0x00; // indices all 0
+  bc1_blocks[30] = 0x00; bc1_blocks[31] = 0x00;
+  
+  // Wrap in a Hap1 frame
+  auto frame = create_hap1_frame(16, 8, bc1_blocks, sizeof(bc1_blocks));
+  
+  // Decode it
+  Decoder decoder;
+  DecodedFrame output;
+  
+  bool ok = decoder.decode(frame.data(), frame.size(), output);
+  HAP_ASSERT(ok);
+  HAP_ASSERT_EQ(output.textures.size(), 1u);
+  
+  const auto &tex = output.textures[0];
+  HAP_ASSERT(tex.format == hap::core::HapTextureFormat::RGB_DXT1);
+  HAP_ASSERT_EQ(tex.data.size(), 32u); // 4 blocks × 8 bytes
+  
+  // Assert: decoded data is byte-for-byte identical to the original BC1 input
+  HAP_ASSERT(memcmp(tex.data.data(), bc1_blocks, sizeof(bc1_blocks)) == 0);
+}
+
 // -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------

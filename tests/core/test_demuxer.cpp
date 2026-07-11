@@ -128,6 +128,40 @@ HAP_TEST(test_demuxer_with_fixture) {
   HAP_ASSERT(result.track.frame_rate > 0.0);
 }
 
+HAP_TEST(test_demuxer_audio_skip) {
+  // Look for audio fixture file (MOV with both video and audio tracks)
+  std::vector<std::string> fixture_paths = {
+      "tests/fixtures/hap1_audio.mov",
+      "../tests/fixtures/hap1_audio.mov",
+  };
+
+  std::string fixture_path;
+  for (const auto &p : fixture_paths) {
+    if (access(p.c_str(), F_OK) == 0) {
+      fixture_path = p;
+      break;
+    }
+  }
+
+  if (fixture_path.empty()) {
+    fprintf(stderr, "SKIP (no audio fixture file found) ");
+    return;
+  }
+
+  MmapReader reader;
+  HAP_ASSERT(reader.open(fixture_path));
+
+  Demuxer demuxer;
+  auto result = demuxer.open(reader);
+  
+  // Assert: demuxer finds and returns the video track despite audio track presence
+  HAP_ASSERT(result.valid); // video track is found
+  HAP_ASSERT(result.track.fourcc == FCC_Hap1); // video track is correctly identified
+  HAP_ASSERT(result.track.width > 0);
+  HAP_ASSERT(result.track.height > 0);
+  HAP_ASSERT(result.track.frame_count > 0);
+}
+
 // -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
