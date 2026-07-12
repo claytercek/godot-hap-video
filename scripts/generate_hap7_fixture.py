@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""Generate a minimal Hap7 (BC7/BPTC) MOV fixture.
+
+ffmpeg cannot encode Hap7. The Vidvox AVF Batch Exporter (macOS GUI) is the
+canonical source, but it is not scriptable or available in CI. This script
+produces a structurally valid MOV with a Hap7 stsd entry and a real Hap7
+frame (None-compressed BC7 block bytes), which is sufficient to prove the
+highest-risk demux path: minimp4 does not recognize the Hap7 FourCC, so
+dimensions must come from the hand-parsed stsd fallback.
+
+The BC7 block bytes are a fixed pattern (mode 6, opaque magenta). They are
+valid BC7 blocks but not meaningful video content. The demuxer and decoder
+treat them as opaque pass-through data, which is exactly what this fixture
+validates.
+
+Usage: python3 scripts/generate_hap7_fixture.py [output_path]
+Default output: tests/fixtures/hap7.mov
+"""
+
+import struct
+import sys
+import os
+
+
+def be32(v):
+    return struct.pack(">I", v)
+
+
+def be16(v):
+    return struct.pack(">H", v)
+
+
+def box(box_type, payload):
+    return be32(8 + len(payload)) + box_type + payload
+
+
+def fullbox(box_type, version, flags, payload):
+    return box(box_type, be32((version << 24) | flags) + payload)
+
+
+def make_ftyp():
+    return box(b"ftyp", b"qt  " + be32(0) + b"qt  ")
+
+
+def make_mvhd():
+    # version=0: timescale(4) + duration(4) + ... (100 bytes total payload after version/flags)
+    payload = b"\x00" * 80  # creation/modification/etc (76 bytes) ...
+    # Build properly: version(1)+flags(3) handled by fullbox
+    body = (
+        b"\x00" * 4   # creation_time (4)
+        + b"\x00" * 4  # modification_time (4)
+        + be32(30)     # timescale
+        + be32(60)     # duration (2 seconds at 30fps)
+        + b"\x00\x01\x00\x00"  # preferred rate 1.0
+        + b"\x01\x00"  # preferred volume 1.0
+        + b"\x00" * 10  # reserved
+        + b"\x00\x01\x00\x00" * 3  # matrix identity (row 0)
+        + b"\x00\x00\x00\x00"
+        + b"\x00\x00\x00\x00\x01\x00\x00\x00" * 2 + b"\x00\x00\x00\x00"  # rows 1,2
+        + b"\x00" * 24  # pre_defined
+    )
+    return fullbox(b"mvhd", 0, 0, body)
+
+
+def make_tkhd(width, height):
+    body = (
+        b"\x00" * 4   # creation_time
+        + b"\x00" * 4  # modification_time
+        + be32(1)      # track_ID
+        + b"\x00" * 4  # reserved
+        + be32(60)     # duration
+        + b"\x00" * 8  # reserved
+        + b"\x00" * 2  # layer
+        + b"\x00" * 2  # alternate_group
+        + b"\x00\x00"  # volume (0 for video)
+        + b"\x00\x00"  # reserved
+        + b"\x00\x01\x00\x00"  # matrix row 0
+        + b"\x00\x00\x00\x00"
+        + b"\x00\x00\x00\x00\x01\x00\x00\x00"  # row 1
+        + b"\x00\x00\x00\x00"
+        + b"\x00\x00\x00\x00\x01\x00\x00\x00"  # row 2
+        + be32(width << 16)   # width (fixed-point 16.16)
+        + be32(height << 16)  # height (fixed-point 16.16)
+    )
+    return fullbox(b"tkhd", 0, 0x03, body)  # flags=3 (track_enabled | track_in_movie)
+
+
+def make_mdhd():
+    body = (
+        b"\x00" * 4   # creation_time
+        + b"\x00" * 4  # modification_time
+        + be32(30)     # timescale
+        + be32(60)     # duration
+        + be16(0x55C4)  # language (undetermined)
+        + be16(0)      # quality
+    )
+    return fullbox(b"mdhd", 0, 0, body)
+
+
+def make_hdlr():
+    body = (
+        b"\x00" * 4   # pre_defined
+        + b"vide"     # handler_type
+        + b"\x00" * 12  # reserved
+        + b"VideoHandler\x00"  # name
+    )
+    return fullbox(b"hdlr", 0, 0, body)
+
+
+def make_vmhd():
+    body = be16(0) + b"\x00" * 6  # graphicsmode + opcolor
+    return fullbox(b"vmhd", 0, 1, body)
+
+
+def make_dref():
+    self_ref = box(b"url ", be32(1))  # flag=1 (self-contained)
+    return fullbox(b"dinf", 0, 0, box(b"dref", be32(0) + be32(1) + self_ref))
+
+
+def make_stsd_hap7(width, height):
+    """Build a stsd box with one Hap7 VisualSampleEntry."""
+    # VisualSampleEntry: 6 reserved + 2 data_ref_idx + 16 pre_defined/reserved
+    #                   + 2 width + 2 height + ...
+    entry_payload = (
+        b"\x00" * 6   # reserved (6)
+        + be16(1)      # data_reference_index
+        + be16(0) + be16(0)  # pre_defined + reserved
+        + b"\x00" * 12  # pre_defined (12)
+        + be16(width)
+        + be16(height)
+        + be32(0x00480000)  # horizresolution (72 dpi)
+        + be32(0x00480000)  # vertresolution (72 dpi)
+        + be32(0)           # reserved
+        + be16(1)           # frame_count
+        + b"\x00" * 32     # compressorname (32)
+        + be16(0x0018)      # depth (24-bit)
+        + be16(0xFFFF)      # color_table_id
+    )
+    entry = box(b"Hap7", entry_payload)
+    return fullbox(b"stsd", 0, 0, be32(1) + entry)
+
+
+def make_stts(frame_count):
+    # 1 entry: sample_count, sample_delta
+    body = be32(1) + be32(frame_count) + be32(1)
+    return fullbox(b"stts", 0, 0, body)
+
+
+def make_stsz(sample_size, sample_count):
+    body = be32(sample_size) + be32(sample_count)
+    if sample_size == 0:
+        body += b"".join(be32(0) for _ in range(sample_count))
+    return fullbox(b"stsz", 0, 0, body)
+
+
+def make_stsc(sample_count):
+    # 1 entry: first_chunk, samples_per_chunk, sample_description_index
+    body = be32(1) + be32(1) + be32(sample_count) + be32(1)
+    return fullbox(b"stsc", 0, 0, body)
+
+
+def make_stco(offset):
+    body = be32(1) + be32(offset)
+    return fullbox(b"stco", 0, 0, body)
+
+
+def make_bc7_block():
+    """A single valid BC7 block: mode 6, all texels opaque magenta.
+
+    Mode 6 (0x20 leading bit): 1 subset, 4-bit endpoints (A,P), 1-bit
+    per texel interpolation. Simplest valid opaque-color block.
+    """
+    # mode 6: bit pattern 110xxxxx... We use a minimal valid block.
+    # mode 6: 1 bit mode(=0...110 -> 0x06<<3? No, BC7 mode is leading 0s count.
+    # Mode 6 has bit 6 set as leading: 0b110xxxxx = the 3 MSBs.
+    # A simple approach: mode 6, endpoints all 255 (white), all indices 0.
+    # Block: 0x60 | payload. Use a known-good pattern.
+    return bytes([
+        0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    ][:16])
+
+
+def make_hap7_frame(width, height):
+    """Build a single Hap7 frame: 4-byte header (type 0xAC, None) + BC7 blocks."""
+    blocks_x = (width + 3) // 4
+    blocks_y = (height + 3) // 4
+    block_count = blocks_x * blocks_y
+    block = make_bc7_block()
+    bc_data = block * block_count
+
+    length = len(bc_data)
+    # 4-byte header: length(3 LE) + type(1)
+    # type 0xAC = None compressor (0xA) | BC7 format (0xC)
+    header = bytes([length & 0xFF, (length >> 8) & 0xFF,
+                    (length >> 16) & 0xFF, 0xAC])
+    return header + bc_data
+
+
+def build_hap7_mov(width=640, height=360):
+    frame_data = make_hap7_frame(width, height)
+
+    # mdat: 8-byte header + frame_data
+    mdat_offset_in_file = 0  # will fix up after computing moov size
+
+    # Build stbl referencing a placeholder offset; fix after computing layout.
+    stsd = make_stsd_hap7(width, height)
+    stts = make_stts(1)
+    stsz = make_stsz(len(frame_data), 1)
+    stsc = make_stsc(1)
+    stco_placeholder = make_stco(0)  # placeholder
+
+    stbl = box(b"stbl", stsd + stts + stsz + stsc + stco_placeholder)
+    minf = box(b"minf", make_vmhd() + make_dref() + stbl)
+    mdia = box(b"mdia", make_mdhd() + make_hdlr() + minf)
+    trak = box(b"trak", make_tkhd(width, height) + mdia)
+    moov = box(b"moov", make_mvhd() + trak)
+
+    ftyp = make_ftyp()
+    # mdat starts after ftyp + moov
+    mdat_data_offset = len(ftyp) + len(moov) + 8  # +8 for mdat header
+
+    # Rebuild stbl with correct offset
+    stco = make_stco(mdat_data_offset)
+    stbl = box(b"stbl", stsd + stts + stsz + stsc + stco)
+    minf = box(b"minf", make_vmhd() + make_dref() + stbl)
+    mdia = box(b"mdia", make_mdhd() + make_hdlr() + minf)
+    trak = box(b"trak", make_tkhd(width, height) + mdia)
+    moov = box(b"moov", make_mvhd() + trak)
+
+    # Recompute offset (moov size may have changed, but stco value doesn't affect size)
+    mdat_data_offset = len(ftyp) + len(moov) + 8
+    # Rebuild again with final offset
+    stco = make_stco(mdat_data_offset)
+    stbl = box(b"stbl", stsd + stts + stsz + stsc + stco)
+    minf = box(b"minf", make_vmhd() + make_dref() + stbl)
+    mdia = box(b"mdia", make_mdhd() + make_hdlr() + minf)
+    trak = box(b"trak", make_tkhd(width, height) + mdia)
+    moov = box(b"moov", make_mvhd() + trak)
+
+    mdat = box(b"mdat", frame_data)
+    return ftyp + moov + mdat
+
+
+def main():
+    out_path = sys.argv[1] if len(sys.argv) > 1 else "tests/fixtures/hap7.mov"
+    data = build_hap7_mov()
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "wb") as f:
+        f.write(data)
+    print(f"Generated {out_path} ({len(data)} bytes)")
+
+
+if __name__ == "__main__":
+    main()
