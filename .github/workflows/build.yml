@@ -104,3 +104,11 @@ jobs:
       - name: Run decoder tests
         run: build/tests/test_decoder
         shell: bash
+
+      - name: Run concurrency tests
+        run: build/tests/test_concurrency
+        shell: bash
+
+      - name: Run scheduler tests
+        run: build/tests/test_scheduler
+        shell: bash

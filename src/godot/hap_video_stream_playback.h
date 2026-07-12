@@ -8,20 +8,32 @@
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/string.hpp>
 
-#include "core/demuxer.h"
-#include "core/decoder.h"
+#include "core/decode_scheduler.h"
 #include "core/hap_frame.h"
-#include "core/mmap_reader.h"
 
+#include <atomic>
 #include <memory>
-#include <vector>
+#include <string>
 
 namespace godot {
 
+/// Position-engine playback: owns the async decode pipeline
+/// (DecodeScheduler: mmap, demux, decode, SPSC frame queue) and the GPU
+/// present pipeline (GpuPresenter: RD textures + compute + ring +
+/// Texture2DRD). No loop, rate, or reverse logic lives here — that's
+/// the power-user layer's job; this decodes the frame at position X.
+///
+/// open() kicks off an asynchronous open on the shared outer pool and
+/// returns immediately; nothing here blocks the main thread. Until the
+/// async open completes, playback virtuals report harmless defaults.
 class HapVideoStreamPlayback : public VideoStreamPlayback {
   GDEXTENSION_CLASS(HapVideoStreamPlayback, VideoStreamPlayback)
 
 public:
+  ~HapVideoStreamPlayback() override {
+    alive_->store(false, std::memory_order_release);
+  }
+
   bool open(const String &p_path);
 
   virtual void _stop() override;
@@ -45,14 +57,21 @@ protected:
   }
 
 private:
-  // Core demuxer/decoder
-  hap::core::Demuxer demuxer_;
-  hap::core::Decoder decoder_;
-  hap::core::MmapReader mmap_;
+  // Async decode pipeline (Godot-free core).
+  hap::core::DecodeScheduler scheduler_;
 
-  // Track info
+  // Track info, valid once open_ready_ becomes true.
   hap::core::VideoTrackInfo track_;
-  std::vector<hap::core::SampleEntry> samples_;
+  std::atomic<bool> open_ready_{false};
+  std::atomic<bool> open_failed_{false};
+  std::string open_error_;
+  bool open_error_logged_ = false;
+
+  // Guards the open_async() completion callback against firing after
+  // this object has been destroyed (the callback runs on an outer-pool
+  // worker thread and outlives no particular object lifetime).
+  std::shared_ptr<std::atomic<bool>> alive_ =
+      std::make_shared<std::atomic<bool>>(true);
 
   // Playback state
   bool is_playing_ = false;
@@ -62,12 +81,22 @@ private:
   double frame_duration_ = 0.0;
   double length_ = 0.0;
 
+  // Becomes true once track_ has been captured and GPU resources
+  // created for it (happens on the first _update() after open_ready_).
+  bool playback_initialized_ = false;
+  bool gpu_init_failed_ = false;
+
   // GPU presenter for RD-based texture upload + compute
   GpuPresenter gpu_presenter_;
-  bool gpu_initialized_ = false;
 
-  /// Upload a decoded frame to the GPU.
-  void upload_decoded_frame(const hap::core::DecodedFrame &frame);
+  /// One-time setup once the async open has completed: captures
+  /// metadata, computes duration, and initializes GPU resources.
+  void initialize_after_open();
+
+  /// Drain the frame queue up to (and including) `target_frame`,
+  /// presenting the first frame found at or after it. Frames behind
+  /// the target are stale prefetch and are discarded.
+  void present_up_to_frame(uint32_t target_frame);
 };
 
 } // namespace godot

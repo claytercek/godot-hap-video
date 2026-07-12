@@ -2,6 +2,7 @@
 #define HAP_GPU_PRESENTER_H
 
 #include "core/hap_frame.h"
+#include "core/retire_ring.h"
 
 #include <godot_cpp/classes/rendering_device.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
@@ -25,7 +26,17 @@ namespace godot {
 ///      a compute shader that performs YCoCg→RGB, writes to an RGBA8 ring,
 ///      and re-points Texture2DRD to the newest ring slot.
 ///
-/// RD resources are created once at init and reused across frames.
+/// Every variant rings its GPU-written textures 3 deep
+/// (hap::core::RetireRing<3>), including the pass-through path and the
+/// YCoCg path's BC source textures — not just its RGBA8 output. Ring
+/// depth 3 is the minimum safe bound against Godot's default render
+/// frame-queue depth of 2: a texture is only reused for a new write
+/// after two other slots have been published in between, so in-flight
+/// GPU reads of an older slot never race a new write. This closes
+/// tearing by construction for every variant.
+///
+/// RD resources are created once at init (RING_SIZE copies per texture)
+/// and reused across frames.
 class GpuPresenter {
 public:
   GpuPresenter() = default;
@@ -67,13 +78,22 @@ private:
   int width_ = 0;
   int height_ = 0;
 
-  // RS-level texture (pass-through path reuses this directly via Texture2DRD)
-  RID rs_color_texture_;
-  RID rs_alpha_texture_;
+  // Single sequencer shared by every per-frame-written resource ring
+  // below: BC source textures (both paths) and the YCoCg output ring
+  // all advance together, once per present() call.
+  hap::core::RetireRing<RING_SIZE> ring_;
+  bool bc_textures_created_ = false;
 
-  // RD texture RIDs extracted from RS textures (for compute shader sampling)
-  RID rd_color_texture_;
-  RID rd_alpha_texture_;
+  // RS-level BC textures, ring of 3 (pass-through path reuses these
+  // directly via Texture2DRD; YCoCg path samples them in the compute
+  // shader).
+  RID rs_color_texture_[RING_SIZE];
+  RID rs_alpha_texture_[RING_SIZE];
+
+  // RD texture RIDs extracted from the RS textures above (for compute
+  // shader sampling), same ring indices.
+  RID rd_color_texture_[RING_SIZE];
+  RID rd_alpha_texture_[RING_SIZE];
 
   // Sampler (nearest for texelFetch)
   RID sampler_;
@@ -84,25 +104,26 @@ private:
   RID uniform_set_;
   bool shader_compiled_ = false;
 
-  // Output ring (RGBA8 storage textures, YCoCg only)
+  // Output ring (RGBA8 storage textures, YCoCg only), indexed by ring_.
   RID output_textures_[RING_SIZE];
-  int current_slot_ = 0;
 
   // Stable Texture2DRD presented to the user
   Ref<Texture2DRD> display_texture_;
 
-  // Reusable Image objects (to avoid creating new ones each frame)
-  Ref<Image> color_image_;
-  Ref<Image> alpha_image_;
+  // Reusable Image objects, one per ring slot (to avoid creating new
+  // ones each frame and to avoid two slots fighting over one Image).
+  Ref<Image> color_image_[RING_SIZE];
+  Ref<Image> alpha_image_[RING_SIZE];
 
   /// Embedded compute shader source (GLSL).
   static const char *ycocg_shader_source_;
 
-  /// Create the RS-level BC texture and its RD counterpart.
-  bool create_bc_texture(hap::core::HapTextureFormat fmt, RID &out_rs_tex,
-                          RID &out_rd_tex);
+  /// Create every ring slot's RS-level BC texture and its RD counterpart.
+  bool create_bc_texture_ring(hap::core::HapTextureFormat fmt,
+                              RID (&out_rs_tex)[RING_SIZE],
+                              RID (&out_rd_tex)[RING_SIZE]);
 
-  /// Update an RS texture with decoded BC data.
+  /// Update one ring slot's RS texture with decoded BC data.
   bool update_bc_texture(const RID &rs_tex, Ref<Image> &image,
                           hap::core::HapTextureFormat fmt,
                           const std::vector<uint8_t> &data);
@@ -113,11 +134,12 @@ private:
   /// Create the output storage textures (ring).
   bool create_output_textures();
 
-  /// Update the uniform set with current RD textures.
-  bool update_uniform_set();
+  /// Update the uniform set with the RD textures for `slot`.
+  bool update_uniform_set(int slot);
 
-  /// Dispatch the compute shader.
-  bool dispatch_compute();
+  /// Dispatch the compute shader, reading ring slot `slot`, writing
+  /// output ring slot `slot`.
+  bool dispatch_compute(int slot);
 
   /// Create the sampler (nearest filtering for texelFetch).
   bool create_sampler();

@@ -1,138 +1,93 @@
 #include "hap_video_stream_playback.h"
 
-#include "core/decoder.h"
 #include "core/hap_frame.h"
 
-#include "hap_texture_2d.h"
-
-#include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/classes/rendering_device.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/error_macros.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
-#include <cstring>
-#include <optional>
-
-namespace {
-
-/// Mapping from a Hap texture format to the Godot Image format + alpha flag
-/// used by the pass-through upload path.
-///
-/// Returns std::nullopt for formats this path can't render correctly
-/// (e.g. a future Hap HDR BC6 frame slipping past the demuxer). There is no
-/// default-to-DXT1 fallback — an unmapped format is a render error.
-struct HapFormatMapping {
-  godot::Image::Format image_format;
-  bool has_alpha;
-};
-
-static std::optional<HapFormatMapping>
-map_hap_format(hap::core::HapTextureFormat fmt) {
-  switch (fmt) {
-  case hap::core::HapTextureFormat::RGB_DXT1:
-    return HapFormatMapping{godot::Image::FORMAT_DXT1, false};
-  case hap::core::HapTextureFormat::RGBA_DXT5:
-    return HapFormatMapping{godot::Image::FORMAT_DXT5, true};
-  // YCoCg-DXT5 reuses the DXT5 block layout but the alpha channel holds
-  // luma (Y), not transparency. It is not a blendable alpha texture; the
-  // YCoCg->RGB compute path (a later stage) is what produces real alpha.
-  case hap::core::HapTextureFormat::YCoCg_DXT5:
-    return HapFormatMapping{godot::Image::FORMAT_DXT5, false};
-  case hap::core::HapTextureFormat::A_RGTC1:
-    return HapFormatMapping{godot::Image::FORMAT_RGTC_R, false};
-  case hap::core::HapTextureFormat::RGBA_BPTC_UNORM:
-    return HapFormatMapping{godot::Image::FORMAT_BPTC_RGBA, true};
-  }
-  return std::nullopt;
-}
-
-/// Convert decoded texture data to a PackedByteArray for Godot Image creation.
-static godot::PackedByteArray texture_data_to_packed(const hap::core::DecodedTexture &tex) {
-  godot::PackedByteArray img_data;
-  img_data.resize(tex.data.size());
-  memcpy(img_data.ptrw(), tex.data.data(), tex.data.size());
-  return img_data;
-}
-
-} // anonymous namespace
-
 namespace godot {
 
 // -----------------------------------------------------------------------
-// Open
+// Open (async)
 // -----------------------------------------------------------------------
 bool HapVideoStreamPlayback::open(const String &p_path) {
-  if (!mmap_.open(p_path.utf8().get_data())) {
-    ERR_PRINT("HapVideo: Failed to open file: " + p_path);
+  if (p_path.is_empty()) {
+    ERR_PRINT("HapVideo: empty path");
     return false;
   }
 
-  auto result = demuxer_.open(mmap_);
-  if (!result.valid) {
-    ERR_PRINT("HapVideo: " + String(result.error_message.c_str()));
-    mmap_.close();
-    return false;
-  }
+  std::string path = p_path.utf8().get_data();
 
-  track_ = result.track;
-  samples_ = std::move(result.samples);
+  // The async open callback runs on an outer-pool worker thread and may
+  // fire after this object is gone; alive_ (kept alive by the shared_ptr
+  // captured by value) lets it detect that and bail without touching
+  // `this`.
+  scheduler_.open_async(
+      path, [this, alive = alive_](bool ok, const std::string &err) {
+        if (!alive->load(std::memory_order_acquire))
+          return;
+        if (ok) {
+          open_ready_.store(true, std::memory_order_release);
+        } else {
+          open_error_ = err;
+          open_failed_.store(true, std::memory_order_release);
+        }
+      });
 
-  if (track_.frame_rate > 0.0) {
-    frame_duration_ = 1.0 / track_.frame_rate;
-  } else {
-    frame_duration_ = 1.0 / 30.0;
-  }
-  length_ = frame_duration_ * track_.frame_count;
-
-  // Create the display texture
-  display_texture_.instantiate();
-
-  // Decode the first frame
-  const uint8_t *sample = demuxer_.sample_data(mmap_, 0);
-  if (sample) {
-    hap::core::DecodedFrame frame;
-    if (decoder_.decode(sample, samples_[0].size, frame)) {
-      upload_decoded_frame(frame);
-    }
-  }
-
+  // open_async() only hands the mmap+parse job to the outer pool and
+  // returns immediately -- nothing above blocks the main thread.
   return true;
 }
 
 // -----------------------------------------------------------------------
-// Upload a decoded frame to the GPU
+// Post-open initialization: metadata + GPU resources
 // -----------------------------------------------------------------------
-void HapVideoStreamPlayback::upload_decoded_frame(
-    const hap::core::DecodedFrame &frame) {
-  if (frame.textures.empty())
-    return;
+void HapVideoStreamPlayback::initialize_after_open() {
+  track_ = scheduler_.track_info();
 
-  const auto &tex = frame.textures[0];
-  if (tex.data.empty())
-    return;
+  frame_duration_ =
+      track_.frame_rate > 0.0 ? 1.0 / track_.frame_rate : 1.0 / 30.0;
+  length_ = frame_duration_ * track_.frame_count;
 
-  // Resolve the format for this pass-through path. No DXT1 fallback —
-  // an unmapped format is a clean render error.
-  auto mapping = map_hap_format(tex.format);
-  if (!mapping) {
-    ERR_PRINT("HapVideo: Unsupported texture format (0x" +
-              String::num_int64(static_cast<int64_t>(tex.format), 16) +
-              ") \u2014 no fallback rendering");
+  RenderingDevice *rd = RenderingServer::get_singleton()->get_rendering_device();
+  if (!gpu_presenter_.initialize(rd, static_cast<int>(track_.width),
+                                 static_cast<int>(track_.height),
+                                 track_.fourcc)) {
+    ERR_PRINT("HapVideo: Failed to initialize GPU presenter");
+    gpu_init_failed_ = true;
     return;
   }
 
-  PackedByteArray img_data = texture_data_to_packed(tex);
+  playback_initialized_ = true;
+  scheduler_.request_frame(0);
+}
 
-  Ref<Image> img = Image::create_from_data(track_.width, track_.height, false,
-                                           mapping->image_format, img_data);
-  if (!img.is_valid()) {
-    ERR_PRINT("HapVideo: Failed to create Image from frame data");
-    return;
+// -----------------------------------------------------------------------
+// Drain the frame queue up to and including target_frame
+// -----------------------------------------------------------------------
+void HapVideoStreamPlayback::present_up_to_frame(uint32_t target_frame) {
+  hap::core::FrameQueue &q = scheduler_.queue();
+
+  uint32_t idx = 0;
+  const hap::core::DecodedFrame *f = q.peek(&idx);
+  while (f && idx < target_frame) {
+    // Stale prefetch (shouldn't normally happen in forward playback,
+    // but seeks and frame-stepping can leave the queue briefly ahead).
+    q.pop();
+    scheduler_.notify_capacity_available();
+    f = q.peek(&idx);
   }
 
-  display_texture_->set_has_alpha(mapping->has_alpha);
-  display_texture_->update_from_image(img);
+  if (f && idx == target_frame) {
+    gpu_presenter_.present(*f);
+    q.pop();
+    scheduler_.notify_capacity_available();
+  }
+  // else: decode hasn't caught up yet -- keep showing the previous
+  // frame rather than blocking; the next _update() tick will retry.
 }
 
 // -----------------------------------------------------------------------
@@ -143,6 +98,9 @@ void HapVideoStreamPlayback::_play() {
   is_paused_ = false;
   current_time_ = 0.0;
   current_frame_ = 0;
+  if (playback_initialized_) {
+    scheduler_.request_frame(0);
+  }
 }
 
 void HapVideoStreamPlayback::_stop() {
@@ -169,63 +127,73 @@ double HapVideoStreamPlayback::_get_playback_position() const {
 void HapVideoStreamPlayback::_seek(double p_time) {
   if (p_time < 0.0)
     p_time = 0.0;
+
+  if (!playback_initialized_) {
+    // Not open yet; remember the request for once init runs the first
+    // present, but there's no track length to clamp against yet.
+    current_time_ = p_time;
+    current_frame_ = 0;
+    return;
+  }
+
   if (p_time > length_)
     p_time = length_;
-
   current_time_ = p_time;
-  if (frame_duration_ > 0.0) {
-    current_frame_ = static_cast<uint32_t>(p_time / frame_duration_);
-    if (current_frame_ >= track_.frame_count)
-      current_frame_ = track_.frame_count - 1;
-  }
+
+  current_frame_ = frame_duration_ > 0.0
+                       ? static_cast<uint32_t>(p_time / frame_duration_)
+                       : 0;
+  if (track_.frame_count > 0 && current_frame_ >= track_.frame_count)
+    current_frame_ = track_.frame_count - 1;
+
+  scheduler_.request_frame(current_frame_);
 }
 
 void HapVideoStreamPlayback::_set_audio_track(int32_t p_idx) {}
 
 Ref<Texture2D> HapVideoStreamPlayback::_get_texture() const {
-  return display_texture_;
+  return gpu_presenter_.get_texture();
 }
 
 void HapVideoStreamPlayback::_update(double p_delta) {
-  if (!is_playing_ || is_paused_)
-    return;
-
-  if (!mmap_ || !demuxer_.is_valid() || !display_texture_.is_valid())
-    return;
-
-  current_time_ += p_delta;
-
-  if (current_time_ >= length_) {
-    is_playing_ = false;
-    current_time_ = length_;
-    current_frame_ = track_.frame_count - 1;
-
-    const uint8_t *sample = demuxer_.sample_data(mmap_, current_frame_);
-    if (sample) {
-      hap::core::DecodedFrame frame;
-      if (decoder_.decode(sample, samples_[current_frame_].size, frame)) {
-        upload_decoded_frame(frame);
-      }
+  if (open_failed_.load(std::memory_order_acquire)) {
+    if (!open_error_logged_) {
+      ERR_PRINT("HapVideo: " + String(open_error_.c_str()));
+      open_error_logged_ = true;
     }
     return;
   }
 
-  uint32_t new_frame =
-      static_cast<uint32_t>(current_time_ / frame_duration_);
-  if (new_frame >= track_.frame_count)
-    new_frame = track_.frame_count - 1;
+  if (!open_ready_.load(std::memory_order_acquire))
+    return; // still opening asynchronously
 
-  if (new_frame != current_frame_) {
-    current_frame_ = new_frame;
+  if (!playback_initialized_) {
+    if (gpu_init_failed_)
+      return;
+    initialize_after_open();
+    if (!playback_initialized_)
+      return;
+  }
 
-    const uint8_t *sample = demuxer_.sample_data(mmap_, current_frame_);
-    if (sample) {
-      hap::core::DecodedFrame frame;
-      if (decoder_.decode(sample, samples_[current_frame_].size, frame)) {
-        upload_decoded_frame(frame);
-      }
+  if (is_playing_ && !is_paused_) {
+    current_time_ += p_delta;
+
+    if (current_time_ >= length_) {
+      is_playing_ = false;
+      current_time_ = length_;
+      current_frame_ = track_.frame_count > 0 ? track_.frame_count - 1 : 0;
+    } else {
+      uint32_t new_frame =
+          frame_duration_ > 0.0
+              ? static_cast<uint32_t>(current_time_ / frame_duration_)
+              : 0;
+      if (track_.frame_count > 0 && new_frame >= track_.frame_count)
+        new_frame = track_.frame_count - 1;
+      current_frame_ = new_frame;
     }
   }
+
+  present_up_to_frame(current_frame_);
 }
 
 int32_t HapVideoStreamPlayback::_get_channels() const { return 0; }

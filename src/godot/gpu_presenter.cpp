@@ -102,27 +102,32 @@ GpuPresenter::~GpuPresenter() {
 GpuPresenter::GpuPresenter(GpuPresenter &&other) noexcept
     : rd_(other.rd_), initialized_(other.initialized_),
       is_ycocg_(other.is_ycocg_), has_alpha_(other.has_alpha_),
-      width_(other.width_), height_(other.height_),
-      rs_color_texture_(other.rs_color_texture_),
-      rs_alpha_texture_(other.rs_alpha_texture_),
-      rd_color_texture_(other.rd_color_texture_),
-      rd_alpha_texture_(other.rd_alpha_texture_),
+      width_(other.width_), height_(other.height_), ring_(other.ring_),
+      bc_textures_created_(other.bc_textures_created_),
       sampler_(other.sampler_), shader_(other.shader_),
       pipeline_(other.pipeline_), uniform_set_(other.uniform_set_),
       shader_compiled_(other.shader_compiled_),
-      current_slot_(other.current_slot_),
-      display_texture_(other.display_texture_),
-      color_image_(other.color_image_), alpha_image_(other.alpha_image_) {
+      display_texture_(other.display_texture_) {
   for (int i = 0; i < RING_SIZE; i++) {
+    rs_color_texture_[i] = other.rs_color_texture_[i];
+    rs_alpha_texture_[i] = other.rs_alpha_texture_[i];
+    rd_color_texture_[i] = other.rd_color_texture_[i];
+    rd_alpha_texture_[i] = other.rd_alpha_texture_[i];
     output_textures_[i] = other.output_textures_[i];
+    color_image_[i] = other.color_image_[i];
+    alpha_image_[i] = other.alpha_image_[i];
+
+    other.rs_color_texture_[i] = RID();
+    other.rs_alpha_texture_[i] = RID();
+    other.rd_color_texture_[i] = RID();
+    other.rd_alpha_texture_[i] = RID();
     other.output_textures_[i] = RID();
+    other.color_image_[i] = Ref<Image>();
+    other.alpha_image_[i] = Ref<Image>();
   }
   other.rd_ = nullptr;
   other.initialized_ = false;
-  other.rs_color_texture_ = RID();
-  other.rs_alpha_texture_ = RID();
-  other.rd_color_texture_ = RID();
-  other.rd_alpha_texture_ = RID();
+  other.bc_textures_created_ = false;
   other.sampler_ = RID();
   other.shader_ = RID();
   other.pipeline_ = RID();
@@ -138,29 +143,34 @@ GpuPresenter &GpuPresenter::operator=(GpuPresenter &&other) noexcept {
     has_alpha_ = other.has_alpha_;
     width_ = other.width_;
     height_ = other.height_;
-    rs_color_texture_ = other.rs_color_texture_;
-    rs_alpha_texture_ = other.rs_alpha_texture_;
-    rd_color_texture_ = other.rd_color_texture_;
-    rd_alpha_texture_ = other.rd_alpha_texture_;
+    ring_ = other.ring_;
+    bc_textures_created_ = other.bc_textures_created_;
     sampler_ = other.sampler_;
     shader_ = other.shader_;
     pipeline_ = other.pipeline_;
     uniform_set_ = other.uniform_set_;
     shader_compiled_ = other.shader_compiled_;
-    current_slot_ = other.current_slot_;
     display_texture_ = other.display_texture_;
-    color_image_ = other.color_image_;
-    alpha_image_ = other.alpha_image_;
     for (int i = 0; i < RING_SIZE; i++) {
+      rs_color_texture_[i] = other.rs_color_texture_[i];
+      rs_alpha_texture_[i] = other.rs_alpha_texture_[i];
+      rd_color_texture_[i] = other.rd_color_texture_[i];
+      rd_alpha_texture_[i] = other.rd_alpha_texture_[i];
       output_textures_[i] = other.output_textures_[i];
+      color_image_[i] = other.color_image_[i];
+      alpha_image_[i] = other.alpha_image_[i];
+
+      other.rs_color_texture_[i] = RID();
+      other.rs_alpha_texture_[i] = RID();
+      other.rd_color_texture_[i] = RID();
+      other.rd_alpha_texture_[i] = RID();
       other.output_textures_[i] = RID();
+      other.color_image_[i] = Ref<Image>();
+      other.alpha_image_[i] = Ref<Image>();
     }
     other.rd_ = nullptr;
     other.initialized_ = false;
-    other.rs_color_texture_ = RID();
-    other.rs_alpha_texture_ = RID();
-    other.rd_color_texture_ = RID();
-    other.rd_alpha_texture_ = RID();
+    other.bc_textures_created_ = false;
     other.sampler_ = RID();
     other.shader_ = RID();
     other.pipeline_ = RID();
@@ -205,11 +215,11 @@ bool GpuPresenter::initialize(RenderingDevice *rd, int width, int height,
 
     // Create the stable Texture2DRD and point it to the first output slot
     display_texture_.instantiate();
-    display_texture_->set_texture_rd_rid(output_textures_[0]);
+    display_texture_->set_texture_rd_rid(output_textures_[ring_.current_slot()]);
 
   } else {
-    // Pass-through path: create a single RS texture
-    // We'll create it lazily on first present() when we know the format
+    // Pass-through path: RS textures are created lazily on first
+    // present() when the format is known.
     display_texture_.instantiate();
   }
 
@@ -250,24 +260,26 @@ void GpuPresenter::cleanup() {
   }
 
   // Free RS textures (which also frees the underlying RD textures)
-  if (rs_color_texture_.is_valid()) {
-    RenderingServer::get_singleton()->free_rid(rs_color_texture_);
-    rs_color_texture_ = RID();
+  for (int i = 0; i < RING_SIZE; i++) {
+    if (rs_color_texture_[i].is_valid()) {
+      RenderingServer::get_singleton()->free_rid(rs_color_texture_[i]);
+      rs_color_texture_[i] = RID();
+    }
+    if (rs_alpha_texture_[i].is_valid()) {
+      RenderingServer::get_singleton()->free_rid(rs_alpha_texture_[i]);
+      rs_alpha_texture_[i] = RID();
+    }
+    rd_color_texture_[i] = RID();
+    rd_alpha_texture_[i] = RID();
+    color_image_[i] = Ref<Image>();
+    alpha_image_[i] = Ref<Image>();
   }
-  if (rs_alpha_texture_.is_valid()) {
-    RenderingServer::get_singleton()->free_rid(rs_alpha_texture_);
-    rs_alpha_texture_ = RID();
-  }
-
-  rd_color_texture_ = RID();
-  rd_alpha_texture_ = RID();
 
   display_texture_ = Ref<Texture2DRD>();
-  color_image_ = Ref<Image>();
-  alpha_image_ = Ref<Image>();
 
   shader_compiled_ = false;
-  current_slot_ = 0;
+  bc_textures_created_ = false;
+  ring_ = hap::core::RetireRing<RING_SIZE>();
   initialized_ = false;
 }
 
@@ -293,35 +305,36 @@ bool GpuPresenter::create_sampler() {
 }
 
 // -----------------------------------------------------------------------
-// Create BC texture (RS + RD)
+// Create a ring of BC textures (RS + RD), RING_SIZE copies
 // -----------------------------------------------------------------------
-bool GpuPresenter::create_bc_texture(hap::core::HapTextureFormat fmt,
-                                      RID &out_rs_tex, RID &out_rd_tex) {
+bool GpuPresenter::create_bc_texture_ring(hap::core::HapTextureFormat fmt,
+                                          RID (&out_rs_tex)[RING_SIZE],
+                                          RID (&out_rd_tex)[RING_SIZE]) {
   Image::Format img_fmt = hap_format_to_image(fmt);
 
-  // Create a dummy image to initialize the texture
-  Ref<Image> dummy = Image::create_empty(width_, height_, false, img_fmt);
-  if (!dummy.is_valid()) {
-    ERR_PRINT("HapGpuPresenter: Failed to create dummy image for BC texture");
-    return false;
-  }
+  for (int i = 0; i < RING_SIZE; i++) {
+    Ref<Image> dummy = Image::create_empty(width_, height_, false, img_fmt);
+    if (!dummy.is_valid()) {
+      ERR_PRINT("HapGpuPresenter: Failed to create dummy image for BC texture");
+      return false;
+    }
 
-  RID rs_tex = RenderingServer::get_singleton()->texture_2d_create(dummy);
-  if (!rs_tex.is_valid()) {
-    ERR_PRINT("HapGpuPresenter: Failed to create RS texture");
-    return false;
-  }
+    RID rs_tex = RenderingServer::get_singleton()->texture_2d_create(dummy);
+    if (!rs_tex.is_valid()) {
+      ERR_PRINT("HapGpuPresenter: Failed to create RS texture");
+      return false;
+    }
 
-  // Get the RD texture RID
-  RID rd_tex = RenderingServer::get_singleton()->texture_get_rd_texture(rs_tex);
-  if (!rd_tex.is_valid()) {
-    ERR_PRINT("HapGpuPresenter: Failed to get RD texture from RS texture");
-    RenderingServer::get_singleton()->free_rid(rs_tex);
-    return false;
-  }
+    RID rd_tex = RenderingServer::get_singleton()->texture_get_rd_texture(rs_tex);
+    if (!rd_tex.is_valid()) {
+      ERR_PRINT("HapGpuPresenter: Failed to get RD texture from RS texture");
+      RenderingServer::get_singleton()->free_rid(rs_tex);
+      return false;
+    }
 
-  out_rs_tex = rs_tex;
-  out_rd_tex = rd_tex;
+    out_rs_tex[i] = rs_tex;
+    out_rd_tex[i] = rd_tex;
+  }
   return true;
 }
 
@@ -432,14 +445,13 @@ bool GpuPresenter::create_output_textures() {
     }
   }
 
-  current_slot_ = 0;
   return true;
 }
 
 // -----------------------------------------------------------------------
-// Update uniform set
+// Update uniform set for a given ring slot
 // -----------------------------------------------------------------------
-bool GpuPresenter::update_uniform_set() {
+bool GpuPresenter::update_uniform_set(int slot) {
   // Free old uniform set
   if (uniform_set_.is_valid()) {
     rd_->free_rid(uniform_set_);
@@ -454,7 +466,7 @@ bool GpuPresenter::update_uniform_set() {
     uniform.instantiate();
     uniform->set_uniform_type(RenderingDevice::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE);
     uniform->set_binding(0);
-    uniform->add_id(rd_color_texture_);
+    uniform->add_id(rd_color_texture_[slot]);
     uniforms.push_back(uniform);
   }
 
@@ -465,7 +477,7 @@ bool GpuPresenter::update_uniform_set() {
     uniform.instantiate();
     uniform->set_uniform_type(RenderingDevice::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE);
     uniform->set_binding(1);
-    uniform->add_id(rd_alpha_texture_);
+    uniform->add_id(rd_alpha_texture_[slot]);
     uniforms.push_back(uniform);
   }
 
@@ -475,7 +487,7 @@ bool GpuPresenter::update_uniform_set() {
     uniform.instantiate();
     uniform->set_uniform_type(RenderingDevice::UNIFORM_TYPE_IMAGE);
     uniform->set_binding(2);
-    uniform->add_id(output_textures_[current_slot_]);
+    uniform->add_id(output_textures_[slot]);
     uniforms.push_back(uniform);
   }
 
@@ -489,16 +501,15 @@ bool GpuPresenter::update_uniform_set() {
 }
 
 // -----------------------------------------------------------------------
-// Dispatch compute shader
+// Dispatch compute shader for ring slot `slot`
 // -----------------------------------------------------------------------
-bool GpuPresenter::dispatch_compute() {
+bool GpuPresenter::dispatch_compute(int slot) {
   if (!shader_compiled_ || !pipeline_.is_valid()) {
     ERR_PRINT("HapGpuPresenter: Compute shader not compiled");
     return false;
   }
 
-  // Update uniform set for the current output slot
-  if (!update_uniform_set()) {
+  if (!update_uniform_set(slot)) {
     return false;
   }
 
@@ -547,83 +558,76 @@ bool GpuPresenter::present(const hap::core::DecodedFrame &frame) {
     return false;
   }
 
+  // Every write this frame targets the ring's writable slot; commit()
+  // publishes it (as the new current_slot()) only once every resource
+  // has been written, so a partially-updated slot is never presented.
+  int slot = static_cast<int>(ring_.writable_slot());
+
   if (is_ycocg_) {
     // --- YCoCg path ---
 
-    // Create BC color texture if not yet created
-    if (!rs_color_texture_.is_valid()) {
-      if (!create_bc_texture(tex0.format, rs_color_texture_, rd_color_texture_)) {
+    if (!bc_textures_created_) {
+      if (!create_bc_texture_ring(tex0.format, rs_color_texture_,
+                                  rd_color_texture_)) {
         return false;
       }
+      hap::core::HapTextureFormat alpha_fmt =
+          (has_alpha_ && frame.textures.size() > 1)
+              ? frame.textures[1].format
+              : hap::core::HapTextureFormat::A_RGTC1;
+      if (!create_bc_texture_ring(alpha_fmt, rs_alpha_texture_,
+                                  rd_alpha_texture_)) {
+        return false;
+      }
+      bc_textures_created_ = true;
     }
 
-    // Update BC color texture
-    if (!update_bc_texture(rs_color_texture_, color_image_, tex0.format, tex0.data)) {
+    if (!update_bc_texture(rs_color_texture_[slot], color_image_[slot],
+                            tex0.format, tex0.data)) {
       return false;
     }
 
-    // For HapM, update the alpha texture (BC4)
     if (has_alpha_ && frame.textures.size() > 1) {
       const auto &tex1 = frame.textures[1];
-      if (!rs_alpha_texture_.is_valid()) {
-        if (!create_bc_texture(tex1.format, rs_alpha_texture_, rd_alpha_texture_)) {
-          return false;
-        }
-      }
-      if (!update_bc_texture(rs_alpha_texture_, alpha_image_, tex1.format, tex1.data)) {
+      if (!update_bc_texture(rs_alpha_texture_[slot], alpha_image_[slot],
+                              tex1.format, tex1.data)) {
         return false;
       }
     }
 
-    // For HapY without alpha, create a dummy BC4 texture
-    if (!has_alpha_ && !rs_alpha_texture_.is_valid()) {
-      if (!create_bc_texture(hap::core::HapTextureFormat::A_RGTC1,
-                              rs_alpha_texture_, rd_alpha_texture_)) {
-        return false;
-      }
-    }
-
-    // Dispatch compute shader
-    if (!dispatch_compute()) {
+    if (!dispatch_compute(slot)) {
       return false;
     }
 
-    // Re-point Texture2DRD to the current output slot
-    display_texture_->set_texture_rd_rid(output_textures_[current_slot_]);
-
-    // Advance ring slot
-    current_slot_ = (current_slot_ + 1) % RING_SIZE;
+    display_texture_->set_texture_rd_rid(output_textures_[slot]);
 
   } else {
     // --- Pass-through path ---
 
-    // Create RS texture if not yet created
-    if (!rs_color_texture_.is_valid()) {
-      Image::Format img_fmt = hap_format_to_image(tex0.format);
-      Ref<Image> dummy = Image::create_empty(width_, height_, false, img_fmt);
-      if (!dummy.is_valid()) {
-        ERR_PRINT("HapGpuPresenter: Failed to create dummy image");
+    if (!bc_textures_created_) {
+      hap::core::HapTextureFormat dummy_fmt = hap::core::HapTextureFormat::A_RGTC1;
+      if (!create_bc_texture_ring(tex0.format, rs_color_texture_,
+                                  rd_color_texture_)) {
         return false;
       }
-      rs_color_texture_ = RenderingServer::get_singleton()->texture_2d_create(dummy);
-      if (!rs_color_texture_.is_valid()) {
-        ERR_PRINT("HapGpuPresenter: Failed to create RS texture");
-        return false;
-      }
+      // Alpha ring unused in the pass-through path; leave empty.
+      (void)dummy_fmt;
+      bc_textures_created_ = true;
     }
 
-    // Update RS texture with decoded BC data
-    if (!update_bc_texture(rs_color_texture_, color_image_, tex0.format, tex0.data)) {
+    if (!update_bc_texture(rs_color_texture_[slot], color_image_[slot],
+                            tex0.format, tex0.data)) {
       return false;
     }
 
-    // Re-point Texture2DRD to the RS texture's RD texture
     RID rd_tex = RenderingServer::get_singleton()->texture_get_rd_texture(
-        rs_color_texture_);
+        rs_color_texture_[slot]);
     if (rd_tex.is_valid()) {
       display_texture_->set_texture_rd_rid(rd_tex);
     }
   }
+
+  ring_.commit();
 
   return true;
 }
