@@ -97,6 +97,11 @@ private:
   /// presenting the first frame found at or after it. Frames behind
   /// the target are stale prefetch and are discarded.
   void present_up_to_frame(uint32_t target_frame);
+
+  /// Convert a playback-position time to a frame index, clamped to the
+  /// track's valid frame range. Only meaningful once track_ is populated
+  /// (after initialize_after_open()).
+  uint32_t frame_from_time(double p_time) const;
 };
 
 } // namespace godot

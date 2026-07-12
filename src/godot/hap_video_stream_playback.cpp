@@ -61,8 +61,24 @@ void HapVideoStreamPlayback::initialize_after_open() {
     return;
   }
 
+  // Resolve any seek/position that arrived before open completed (e.g.
+  // stream_position set immediately after assigning the stream) rather
+  // than always starting from frame 0.
+  if (current_time_ > length_)
+    current_time_ = length_;
+  current_frame_ = frame_from_time(current_time_);
+
   playback_initialized_ = true;
-  scheduler_.request_frame(0);
+  scheduler_.request_frame(current_frame_);
+}
+
+uint32_t HapVideoStreamPlayback::frame_from_time(double p_time) const {
+  uint32_t frame = frame_duration_ > 0.0
+                       ? static_cast<uint32_t>(p_time / frame_duration_)
+                       : 0;
+  if (track_.frame_count > 0 && frame >= track_.frame_count)
+    frame = track_.frame_count - 1;
+  return frame;
 }
 
 // -----------------------------------------------------------------------
@@ -129,22 +145,17 @@ void HapVideoStreamPlayback::_seek(double p_time) {
     p_time = 0.0;
 
   if (!playback_initialized_) {
-    // Not open yet; remember the request for once init runs the first
-    // present, but there's no track length to clamp against yet.
+    // Not open yet; remember the requested time. initialize_after_open()
+    // resolves it to a frame once track length is known, rather than
+    // discarding it and always starting from frame 0.
     current_time_ = p_time;
-    current_frame_ = 0;
     return;
   }
 
   if (p_time > length_)
     p_time = length_;
   current_time_ = p_time;
-
-  current_frame_ = frame_duration_ > 0.0
-                       ? static_cast<uint32_t>(p_time / frame_duration_)
-                       : 0;
-  if (track_.frame_count > 0 && current_frame_ >= track_.frame_count)
-    current_frame_ = track_.frame_count - 1;
+  current_frame_ = frame_from_time(current_time_);
 
   scheduler_.request_frame(current_frame_);
 }
@@ -183,13 +194,7 @@ void HapVideoStreamPlayback::_update(double p_delta) {
       current_time_ = length_;
       current_frame_ = track_.frame_count > 0 ? track_.frame_count - 1 : 0;
     } else {
-      uint32_t new_frame =
-          frame_duration_ > 0.0
-              ? static_cast<uint32_t>(current_time_ / frame_duration_)
-              : 0;
-      if (track_.frame_count > 0 && new_frame >= track_.frame_count)
-        new_frame = track_.frame_count - 1;
-      current_frame_ = new_frame;
+      current_frame_ = frame_from_time(current_time_);
     }
   }
 
