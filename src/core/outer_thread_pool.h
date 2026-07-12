@@ -51,6 +51,13 @@ public:
   /// convenience; production code should not need to wait on the pool.
   void wait_idle();
 
+  /// Block until no job is queued or running for `stream_id`. A stream
+  /// owner (e.g. DecodeScheduler) must call this before destroying
+  /// anything a still-running or still-queued job for that stream might
+  /// touch -- jobs capture `this` by raw pointer and the pool has no way
+  /// to cancel a job once submitted.
+  void wait_for_stream_idle(uint64_t stream_id);
+
 private:
   OuterThreadPool();
   ~OuterThreadPool();

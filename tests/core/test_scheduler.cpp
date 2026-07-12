@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <future>
 #include <string>
 #include <thread>
 #include <vector>
@@ -160,6 +161,169 @@ HAP_TEST(scheduler_seek_drains_and_retargets) {
   });
   HAP_ASSERT(got);
   HAP_ASSERT(idx >= seek_target);
+}
+
+HAP_TEST(scheduler_backward_seek_drains_and_retargets) {
+  std::string path = find_fixture("hap1.mov");
+  if (path.empty()) {
+    fprintf(stderr, "SKIP (no fixture) ");
+    return;
+  }
+
+  DecodeScheduler scheduler;
+  std::atomic<bool> opened{false};
+  scheduler.open_async(
+      path, [&](bool ok, const std::string &) { opened.store(ok); });
+  HAP_ASSERT(wait_for([&]() { return opened.load(); }));
+
+  uint32_t frame_count = scheduler.track_info().frame_count;
+  if (frame_count < 15) {
+    fprintf(stderr, "SKIP (fixture too short) ");
+    return;
+  }
+
+  scheduler.request_frame(0);
+
+  // Consume forward far enough that the queue is prefetching well past
+  // the backward target, so the drain has stale (higher-index) frames
+  // to discard.
+  uint32_t expected = 0;
+  while (expected < 10) {
+    uint32_t idx = 0;
+    HAP_ASSERT(wait_for([&]() { return scheduler.queue().peek(&idx) != nullptr; }));
+    scheduler.queue().peek(&idx);
+    HAP_ASSERT_EQ(idx, expected);
+    scheduler.queue().pop();
+    scheduler.notify_capacity_available();
+    expected++;
+  }
+
+  // Let a little more forward prefetch land in the (now-refilling) queue
+  // before seeking backward, so there is real stale, higher-index
+  // material to drain.
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+  const uint32_t seek_target = 2;
+  scheduler.request_frame(seek_target);
+
+  // Every frame observed from here on must never regress below the
+  // target (no stale pre-seek frame slips through) and must eventually
+  // reach the target itself.
+  bool saw_target = false;
+  auto start = std::chrono::steady_clock::now();
+  while (std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now() - start)
+             .count() < 5000) {
+    uint32_t idx = 0;
+    const DecodedFrame *f = scheduler.queue().peek(&idx);
+    if (!f) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      continue;
+    }
+    HAP_ASSERT(idx >= seek_target);
+    if (idx == seek_target)
+      saw_target = true;
+    scheduler.queue().pop();
+    scheduler.notify_capacity_available();
+    if (saw_target)
+      break;
+  }
+  HAP_ASSERT(saw_target);
+}
+
+HAP_TEST(scheduler_rapid_seeks_resolve_to_latest_target_only) {
+  std::string path = find_fixture("hap1.mov");
+  if (path.empty()) {
+    fprintf(stderr, "SKIP (no fixture) ");
+    return;
+  }
+
+  DecodeScheduler scheduler;
+  std::atomic<bool> opened{false};
+  scheduler.open_async(
+      path, [&](bool ok, const std::string &) { opened.store(ok); });
+  HAP_ASSERT(wait_for([&]() { return opened.load(); }));
+
+  uint32_t frame_count = scheduler.track_info().frame_count;
+  if (frame_count < 45) {
+    fprintf(stderr, "SKIP (fixture too short) ");
+    return;
+  }
+
+  scheduler.request_frame(0);
+
+  // Let one frame land and consume it so a decode is plausibly in
+  // flight, then fire a burst of seeks back-to-back with no waiting in
+  // between -- only the last one should ever be honored (latest seek
+  // wins). The discarded targets are chosen far from both the initial
+  // in-flight window and the final target so any of them showing up in
+  // the queue is unambiguously a scheduling bug, not a coincidence of
+  // sequential decode.
+  uint32_t idx = 0;
+  HAP_ASSERT(wait_for([&]() { return scheduler.queue().peek(&idx) != nullptr; }));
+  scheduler.queue().pop();
+  scheduler.notify_capacity_available();
+
+  const uint32_t final_target = 3;
+  const uint32_t discarded[] = {frame_count - 5, frame_count - 15,
+                                frame_count - 25};
+  for (uint32_t t : discarded)
+    scheduler.request_frame(t);
+  scheduler.request_frame(final_target);
+
+  // Drain everything the scheduler produces for a bounded window,
+  // asserting none of the discarded targets is ever served and that the
+  // final target eventually is.
+  bool saw_final_target = false;
+  auto start = std::chrono::steady_clock::now();
+  while (std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now() - start)
+             .count() < 5000) {
+    uint32_t observed = 0;
+    const DecodedFrame *f = scheduler.queue().peek(&observed);
+    if (!f) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      continue;
+    }
+    for (uint32_t t : discarded)
+      HAP_ASSERT(observed != t);
+    if (observed == final_target)
+      saw_final_target = true;
+    scheduler.queue().pop();
+    scheduler.notify_capacity_available();
+    if (saw_final_target)
+      break;
+  }
+  HAP_ASSERT(saw_final_target);
+}
+
+HAP_TEST(scheduler_destroyed_immediately_after_open_does_not_hang_or_crash) {
+  std::string path = find_fixture("hap1.mov");
+  if (path.empty()) {
+    fprintf(stderr, "SKIP (no fixture) ");
+    return;
+  }
+
+  // Destroying a DecodeScheduler while its open_async job is still queued
+  // or in flight must be safe: the destructor has to block until that job
+  // (which captures `this`) finishes, rather than let it run against
+  // freed memory. Run off-thread with a bounded wait so a regression
+  // (destructor returns without joining the job) hangs this test instead
+  // of the whole suite.
+  std::promise<void> done;
+  std::future<void> done_future = done.get_future();
+  std::thread runner([&]() {
+    for (int i = 0; i < 20; i++) {
+      DecodeScheduler scheduler;
+      scheduler.open_async(path, [](bool, const std::string &) {});
+      // No wait for the callback -- destructor races the open job.
+    }
+    done.set_value();
+  });
+  runner.detach();
+
+  HAP_ASSERT(done_future.wait_for(std::chrono::seconds(10)) ==
+             std::future_status::ready);
 }
 
 int main() { return hap::test::run_all(); }

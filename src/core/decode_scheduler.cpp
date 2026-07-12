@@ -12,15 +12,18 @@ std::atomic<uint64_t> g_next_stream_id{1};
 DecodeScheduler::DecodeScheduler()
     : stream_id_(g_next_stream_id.fetch_add(1, std::memory_order_relaxed)) {}
 
-DecodeScheduler::~DecodeScheduler() = default;
+DecodeScheduler::~DecodeScheduler() {
+  OuterThreadPool::instance().wait_for_stream_idle(stream_id_);
+}
 
 void DecodeScheduler::open_async(
     const std::string &path,
     std::function<void(bool, const std::string &)> on_opened) {
-  // A one-shot job, not bound to a stream id — nothing else touches this
-  // scheduler's demuxer/mmap until open completes, so there's nothing to
-  // serialize against yet.
-  OuterThreadPool::instance().submit([this, path, on_opened]() {
+  // Stream-bound (not a plain one-shot submit()) so wait_for_stream_idle()
+  // in the destructor also covers this job: if the scheduler is torn down
+  // before open completes, the destructor must block on it too, or the
+  // job's `this` capture goes dangling once the pool gets around to it.
+  OuterThreadPool::instance().submit_for_stream(stream_id_, [this, path, on_opened]() {
     if (!mmap_.open(path)) {
       open_failed_.store(true, std::memory_order_release);
       if (on_opened)

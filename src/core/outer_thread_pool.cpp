@@ -82,6 +82,7 @@ void OuterThreadPool::on_stream_job_done(uint64_t stream_id) {
     });
   } else {
     st.active = false;
+    cv_.notify_all();
   }
 }
 
@@ -108,6 +109,15 @@ void OuterThreadPool::worker_loop() {
 void OuterThreadPool::wait_idle() {
   std::unique_lock<std::mutex> lock(mutex_);
   cv_.wait(lock, [this]() { return in_flight_ == 0 && ready_.empty(); });
+}
+
+void OuterThreadPool::wait_for_stream_idle(uint64_t stream_id) {
+  std::unique_lock<std::mutex> lock(mutex_);
+  cv_.wait(lock, [this, stream_id]() {
+    auto it = streams_.find(stream_id);
+    return it == streams_.end() ||
+          (!it->second.active && it->second.pending.empty());
+  });
 }
 
 } // namespace core

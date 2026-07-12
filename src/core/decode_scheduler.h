@@ -44,6 +44,10 @@ namespace core {
 class DecodeScheduler {
 public:
   DecodeScheduler();
+  /// Blocks until no fill_step is queued or running for this stream on
+  /// the shared OuterThreadPool -- a queued/in-flight fill_step captures
+  /// `this` by raw pointer, so it must never observe this object mid- or
+  /// post-destruction.
   ~DecodeScheduler();
 
   DecodeScheduler(const DecodeScheduler &) = delete;
