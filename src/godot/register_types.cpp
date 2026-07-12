@@ -12,6 +12,12 @@
 using namespace godot;
 
 void initialize_hap_video_module(ModuleInitializationLevel p_level) {
+  if (p_level == MODULE_INITIALIZATION_LEVEL_SERVERS) {
+    // Resource format loaders must be registered at SERVERS level so the
+    // resource system discovers them early enough for load() calls.
+    ClassDB::register_class<HapResourceFormatLoader>();
+  }
+
   if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
     return;
   }
@@ -19,11 +25,11 @@ void initialize_hap_video_module(ModuleInitializationLevel p_level) {
   ClassDB::register_class<HapTexture2D>();
   ClassDB::register_class<HapVideoStream>();
   ClassDB::register_class<HapVideoStreamPlayback>();
-  ClassDB::register_class<HapResourceFormatLoader>();
 }
 
 void uninitialize_hap_video_module(ModuleInitializationLevel p_level) {
-  if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
+  if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE &&
+      p_level != MODULE_INITIALIZATION_LEVEL_SERVERS) {
     return;
   }
 }
@@ -41,7 +47,7 @@ GDExtensionBool GDE_EXPORT hap_video_init(
   init_obj.register_initializer(initialize_hap_video_module);
   init_obj.register_terminator(uninitialize_hap_video_module);
   init_obj.set_minimum_library_initialization_level(
-      MODULE_INITIALIZATION_LEVEL_SCENE);
+      MODULE_INITIALIZATION_LEVEL_SERVERS);
 
   return init_obj.init();
 }
