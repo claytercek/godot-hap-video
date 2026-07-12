@@ -55,16 +55,18 @@ public:
   /// Static so it can be tested without opening a file.
   static StsdResult parse_stsd(const uint8_t *data, uint32_t size, VideoFormat &out_format);
 
+  /// Validate all sample offsets/sizes against the file size. Static and
+  /// public so it can be tested with synthetic offsets (including
+  /// >4 GB ones) without needing a real multi-gigabyte fixture.
+  static bool validate_samples(const std::vector<SampleEntry> &samples,
+                               uint64_t file_size, std::string &error);
+
 private:
   MP4D_demux_t *mp4_ = nullptr; // Owned heap-allocated minimp4 context
   bool valid_ = false;
   VideoTrackInfo track_;
   std::vector<SampleEntry> samples_;
   uint64_t file_size_ = 0;
-
-  /// Validate all sample offsets/sizes against the file size.
-  bool validate_samples(const std::vector<SampleEntry> &samples,
-                        uint64_t file_size, std::string &error);
 
   /// Clean up the minimp4 context.
   void cleanup_mp4();

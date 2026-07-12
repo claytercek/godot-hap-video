@@ -368,6 +368,49 @@ HAP_TEST(test_demuxer_audio_skip) {
 }
 
 // -----------------------------------------------------------------------
+// validate_samples: 64-bit offset tests (synthetic, no multi-GB fixture
+// needed -- file_size is just a parameter).
+// -----------------------------------------------------------------------
+
+HAP_TEST(test_validate_samples_accepts_offset_beyond_4gb) {
+  // A sample living entirely past the 32-bit boundary in a >4 GB file.
+  constexpr uint64_t kFourGb = 1ull << 32;
+  std::vector<SampleEntry> samples = {
+      {kFourGb + 1024, 4096}, // offset ~4 GB + 1 KiB, 4 KiB sample
+  };
+  uint64_t file_size = kFourGb + 1024 + 4096;
+  std::string error;
+  HAP_ASSERT(Demuxer::validate_samples(samples, file_size, error));
+  HAP_ASSERT(error.empty());
+}
+
+HAP_TEST(test_validate_samples_rejects_offset_beyond_4gb_out_of_range) {
+  // Same >4 GB offset, but the file is one byte too short to hold it --
+  // must be caught by 64-bit arithmetic, not wrap/truncate to a
+  // spuriously "in range" 32-bit value.
+  constexpr uint64_t kFourGb = 1ull << 32;
+  std::vector<SampleEntry> samples = {
+      {kFourGb + 1024, 4096},
+  };
+  uint64_t file_size = kFourGb + 1024 + 4096 - 1; // one byte short
+  std::string error;
+  HAP_ASSERT(!Demuxer::validate_samples(samples, file_size, error));
+  HAP_ASSERT(!error.empty());
+}
+
+HAP_TEST(test_validate_samples_handles_offset_and_size_summing_past_4gb) {
+  // offset itself fits in 32 bits, but offset + size overflows a 32-bit
+  // sum; must be computed in 64-bit to avoid a false negative.
+  constexpr uint64_t kFourGb = 1ull << 32;
+  std::vector<SampleEntry> samples = {
+      {kFourGb - 100, 200}, // end = kFourGb + 100, past the 32-bit line
+  };
+  std::string error;
+  HAP_ASSERT(!Demuxer::validate_samples(samples, kFourGb, error));
+  HAP_ASSERT(Demuxer::validate_samples(samples, kFourGb + 100, error));
+}
+
+// -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
 int main() {
