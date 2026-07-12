@@ -70,6 +70,11 @@ void InnerThreadPool::execute(HapDecodeWorkFunction func, void *p,
     return;
   }
 
+  // The outer pool may have several streams decoding concurrently; only
+  // one of them may be dispatching into the shared inner pool at a time
+  // (func_/p_/partitions_ are single-batch shared state).
+  std::lock_guard<std::mutex> dispatch_lock(dispatch_mutex_);
+
   unsigned int total_workers = num_workers_ + 1; // calling thread + pool
 
   // Partition work evenly across all workers (including the calling thread).

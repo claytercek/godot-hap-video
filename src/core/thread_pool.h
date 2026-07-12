@@ -21,8 +21,13 @@ namespace core {
 /// where outer_workers defaults to 3 (matching the outer pool size).
 /// Clamped to a minimum of 1.
 ///
-/// Singleton: shared by all streams. The outer pool serializes per-stream
-/// decode, so only one stream's chunks are dispatched at any time. The
+/// Singleton: shared by all streams. The outer pool runs up to
+/// outer_workers streams concurrently, so multiple streams' chunked
+/// frames can call execute() at the same time; execute() itself
+/// serializes those calls (dispatch_mutex_) so the shared work-batch
+/// state is never touched by two callers at once. This trades
+/// chunk-level parallelism across simultaneously-chunk-decoding streams
+/// for correctness — the thread count stays bounded either way. The
 /// thread count is auto-derived from the hardware at construction time.
 class InnerThreadPool {
 public:
@@ -30,7 +35,8 @@ public:
   static InnerThreadPool &instance();
 
   /// Execute `count` work items across the thread pool.
-  /// Blocks until all items complete.
+  /// Blocks until all items complete. Safe to call concurrently from
+  /// multiple outer-pool workers — calls are internally serialized.
   /// @param func  The work function to call per chunk index
   /// @param p     Opaque context pointer passed to the work function
   /// @param count Number of work items (chunks) to process
@@ -54,6 +60,10 @@ private:
 
   /// Number of worker threads (pool size, excluding calling thread).
   unsigned int num_workers_ = 0;
+
+  /// Serializes execute() calls across concurrent outer-pool workers.
+  /// Held for the full duration of one batch's dispatch-and-wait.
+  std::mutex dispatch_mutex_;
 
   /// Synchronization.
   std::mutex mutex_;

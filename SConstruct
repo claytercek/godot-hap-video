@@ -164,8 +164,13 @@ if ARGUMENTS.get("build_tests", "0") == "1":
     test_sources = [
         "tests/core/test_demuxer.cpp",
         "tests/core/test_decoder.cpp",
+        "tests/core/test_concurrency.cpp",
     ]
 
+    if sys.platform != "win32":
+        test_env.Append(LIBS=["pthread"])
+
+    test_targets = []
     for src in test_sources:
         if not os.path.exists(src):
             continue
@@ -174,6 +179,7 @@ if ARGUMENTS.get("build_tests", "0") == "1":
             "build/src/core/demuxer.os",
             "build/src/core/decoder.os",
             "build/src/core/thread_pool.os",
+            "build/src/core/outer_thread_pool.os",
             "build/src/core/mmap_reader.os",
         ]
         test_bin = test_env.Program(
@@ -182,5 +188,6 @@ if ARGUMENTS.get("build_tests", "0") == "1":
             LIBS=[hap_lib, snappy_lib, minimp4_lib],
         )
         Default(test_bin)
+        test_targets.append(test_bin)
 
-    Alias("core_tests", "build/tests/test_demuxer")
+    Alias("core_tests", test_targets)
