@@ -101,9 +101,13 @@ library = env.SharedLibrary(
     LIBS=[hap_lib, snappy_lib, minimp4_lib] + env.get("LIBS", []),
 )
 
-# Install into addon directory
+# Install into addon directory. On MSVC, SharedLibrary() also returns the
+# .lib import library and .exp export file alongside the .dll; Godot only
+# ever loads the .dll (per the .gdextension manifest below), so skip those
+# two to keep them out of the shipped addon.
 install_dir = "{}/{}/".format(projectdir, env["platform"])
-copy = env.Install(install_dir, library)
+dll_only = [f for f in library if not str(f).endswith((".lib", ".exp"))]
+copy = env.Install(install_dir, dll_only)
 
 # -----------------------------------------------------------------------
 # Generate .gdextension manifest
