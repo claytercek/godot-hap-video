@@ -10,18 +10,15 @@
 #include "core/demuxer.h"
 #include "core/hap_frame.h"
 #include "core/mmap_reader.h"
-#include "core/outer_thread_pool.h"
-#include "core/thread_pool.h"
 
 #include "hap.h"
 #include "test.h"
+#include "test_fixtures.h"
+#include "test_hap_frames.h"
 
-#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <string>
-#include <thread>
-#include <unistd.h>
 
 using namespace hap::core;
 
@@ -406,23 +403,11 @@ HAP_TEST(test_decoder_hap_format_rejected) {
 // the None compressor) and assert format + expected BC block byte count.
 // -----------------------------------------------------------------------
 
-static std::string find_fixture(const std::vector<std::string> &names) {
-  std::vector<std::string> paths = {
-      "tests/fixtures/",
-      "../tests/fixtures/",
-  };
-  for (const auto &name : names) {
-    for (const auto &p : paths) {
-      std::string full = p + name;
-      if (access(full.c_str(), F_OK) == 0)
-        return full;
-    }
-  }
-  return "";
-}
+using hap::test::find_fixture;
+using hap::test::find_fixture_dir;
 
 HAP_TEST(test_decoder_hap5_fixture_frame0) {
-  std::string path = find_fixture({"hap5.mov"});
+  std::string path = find_fixture("hap5.mov");
   if (path.empty()) {
     fprintf(stderr, "SKIP (no hap5 fixture) ");
     return;
@@ -453,7 +438,7 @@ HAP_TEST(test_decoder_hap5_fixture_frame0) {
 }
 
 HAP_TEST(test_decoder_hap7_fixture_frame0) {
-  std::string path = find_fixture({"hap7.mov"});
+  std::string path = find_fixture("hap7.mov");
   if (path.empty()) {
     fprintf(stderr, "SKIP (no hap7 fixture) ");
     return;
@@ -482,59 +467,10 @@ HAP_TEST(test_decoder_hap7_fixture_frame0) {
                static_cast<size_t>(demuxer.track_info().frame_bytes()));
 }
 
-// -----------------------------------------------------------------------
-// Chunked frame helpers
-//
-// We use HapEncode (from the vendored hap.c) to create valid chunked frames
-// and a manual builder for unchunked frames. This way we test the actual
-// hap.c encode path as well as our decode path.
-// -----------------------------------------------------------------------
-
-/// Create an unchunked (None-compressed) Hap1 frame from raw BC1 data.
-static std::vector<uint8_t> create_unchunked_hap1(const uint8_t *bc1_data,
-                                                   size_t bc1_size) {
-  std::vector<uint8_t> frame;
-  uint32_t length = static_cast<uint32_t>(bc1_size);
-  frame.push_back(length & 0xFF);
-  frame.push_back((length >> 8) & 0xFF);
-  frame.push_back((length >> 16) & 0xFF);
-  frame.push_back(0xAB); // None|DXT1
-  frame.insert(frame.end(), bc1_data, bc1_data + bc1_size);
-  return frame;
-}
-
-/// Create a chunked (Complex/Snappy) frame from raw texture data.
-/// Uses HapEncode with the given number of chunks and texture format.
-static std::vector<uint8_t> create_chunked_frame(const uint8_t *tex_data,
-                                                  size_t tex_size,
-                                                  unsigned int chunk_count,
-                                                  unsigned int texture_format,
-                                                  unsigned int compressor) {
-  // Use HapMaxEncodedLength for accurate buffer sizing
-  unsigned long lengths[] = {static_cast<unsigned long>(tex_size)};
-  unsigned int tex_fmts[] = {texture_format};
-  unsigned int chunk_counts[] = {chunk_count};
-  unsigned long max_size = HapMaxEncodedLength(1, lengths, tex_fmts,
-                                                 chunk_counts);
-  if (max_size == 0) {
-    return {};
-  }
-
-  std::vector<uint8_t> output(max_size, 0);
-  unsigned long bytes_used = 0;
-  const void *input_bufs[] = {tex_data};
-  unsigned long input_sizes[] = {static_cast<unsigned long>(tex_size)};
-  unsigned int compressors[] = {compressor};
-
-  unsigned int result = HapEncode(1, input_bufs, input_sizes, tex_fmts,
-                                   compressors, chunk_counts,
-                                   output.data(), max_size, &bytes_used);
-  if (result != HapResult_No_Error) {
-    return {};
-  }
-  output.resize(bytes_used);
-  return output;
-}
+// Chunked frame builders shared with test_concurrency.cpp live in
+// test_hap_frames.h (HapEncode-based, so the real encode path is tested).
+using hap::test::create_chunked_frame;
+using hap::test::create_unchunked_hap1;
 
 // -----------------------------------------------------------------------
 // Chunked decode tests
@@ -673,14 +609,6 @@ HAP_TEST(test_decoder_chunked_hapy_byte_identical) {
 // their unchunked counterparts.
 // -----------------------------------------------------------------------
 
-#include <sys/stat.h>
-
-/// Check if a fixture file exists.
-static bool fixture_exists(const std::string &path) {
-  struct stat st;
-  return stat(path.c_str(), &st) == 0;
-}
-
 /// Decode the first frame of a fixture file.
 static bool decode_fixture_frame(const std::string &path,
                                   hap::core::DecodedFrame &out) {
@@ -731,130 +659,66 @@ static bool check_chunked_identity(const std::string &unchunked_path,
   return true;
 }
 
-HAP_TEST(test_decoder_hap1_fixture) {
-  // Look for fixture files in various locations
-  std::vector<std::string> dirs = {"tests/fixtures/", "../tests/fixtures/"};
-  std::string base;
-  for (auto &d : dirs) {
-    if (fixture_exists(d + "hap1.mov")) {
-      base = d;
-      break;
-    }
-  }
-  if (base.empty()) {
-    fprintf(stderr, "SKIP (no fixture directory) ");
-    return;
-  }
+HAP_TEST(test_decoder_per_codec_fixture) {
+  struct Case {
+    const char *filename;
+    hap::core::HapTextureFormat format;
+    size_t expected_bytes; // 640x360 at the format's BC block size
+  };
+  static const Case kCases[] = {
+      {"hap1.mov", hap::core::HapTextureFormat::RGB_DXT1, 115200u},
+      {"hapy.mov", hap::core::HapTextureFormat::YCoCg_DXT5, 230400u},
+      {"hap5.mov", hap::core::HapTextureFormat::RGBA_DXT5, 230400u},
+  };
 
-  hap::core::DecodedFrame frame;
-  HAP_ASSERT(decode_fixture_frame(base + "hap1.mov", frame));
-  HAP_ASSERT_EQ(frame.textures.size(), 1u);
-  HAP_ASSERT(frame.textures[0].format == hap::core::HapTextureFormat::RGB_DXT1);
-  HAP_ASSERT(frame.textures[0].data.size() > 0);
-  HAP_ASSERT_EQ(frame.textures[0].data.size(), 115200u); // 640x360 BC1
+  for (const auto &c : kCases) {
+    std::string base = find_fixture_dir({c.filename});
+    if (base.empty()) {
+      fprintf(stderr, "SKIP (no fixture directory for %s) ", c.filename);
+      continue;
+    }
+
+    hap::core::DecodedFrame frame;
+    if (!decode_fixture_frame(base + c.filename, frame)) {
+      fprintf(stderr, "  FAIL %s: decode error\n", c.filename);
+      HAP_ASSERT(false);
+      continue;
+    }
+    HAP_ASSERT_EQ(frame.textures.size(), 1u);
+    if (frame.textures[0].format != c.format || frame.textures[0].data.size() != c.expected_bytes) {
+      fprintf(stderr, "  FAIL %s: format or size mismatch\n", c.filename);
+    }
+    HAP_ASSERT(frame.textures[0].format == c.format);
+    HAP_ASSERT_EQ(frame.textures[0].data.size(), c.expected_bytes);
+  }
 }
 
-HAP_TEST(test_decoder_hapy_fixture) {
-  std::string base;
-  std::vector<std::string> dirs = {"tests/fixtures/", "../tests/fixtures/"};
-  for (auto &d : dirs) {
-    if (fixture_exists(d + "hapy.mov")) {
-      base = d;
-      break;
+HAP_TEST(test_decoder_chunked_identity_fixture) {
+  struct Case {
+    const char *unchunked;
+    const char *chunked;
+    const char *label;
+  };
+  static const Case kCases[] = {
+      {"hap1.mov", "hap1_chunked.mov", "Hap1"},
+      {"hapy.mov", "hapy_chunked.mov", "HapY"},
+      {"hap5.mov", "hap5_chunked.mov", "Hap5"},
+  };
+
+  for (const auto &c : kCases) {
+    std::string base = find_fixture_dir({c.unchunked, c.chunked});
+    if (base.empty()) {
+      fprintf(stderr, "SKIP (no fixtures for %s) ", c.label);
+      continue;
     }
+    HAP_ASSERT(check_chunked_identity(base + c.unchunked, base + c.chunked, c.label));
   }
-  if (base.empty()) {
-    fprintf(stderr, "SKIP (no fixture directory) ");
-    return;
-  }
-
-  hap::core::DecodedFrame frame;
-  HAP_ASSERT(decode_fixture_frame(base + "hapy.mov", frame));
-  HAP_ASSERT_EQ(frame.textures.size(), 1u);
-  HAP_ASSERT(frame.textures[0].format == hap::core::HapTextureFormat::YCoCg_DXT5);
-  HAP_ASSERT_EQ(frame.textures[0].data.size(), 230400u); // 640x360 BC3
-}
-
-HAP_TEST(test_decoder_hap5_fixture) {
-  std::string base;
-  std::vector<std::string> dirs = {"tests/fixtures/", "../tests/fixtures/"};
-  for (auto &d : dirs) {
-    if (fixture_exists(d + "hap5.mov")) {
-      base = d;
-      break;
-    }
-  }
-  if (base.empty()) {
-    fprintf(stderr, "SKIP (no fixture directory) ");
-    return;
-  }
-
-  hap::core::DecodedFrame frame;
-  HAP_ASSERT(decode_fixture_frame(base + "hap5.mov", frame));
-  HAP_ASSERT_EQ(frame.textures.size(), 1u);
-  HAP_ASSERT(frame.textures[0].format == hap::core::HapTextureFormat::RGBA_DXT5);
-  HAP_ASSERT_EQ(frame.textures[0].data.size(), 230400u); // 640x360 BC3
-}
-
-HAP_TEST(test_decoder_hap1_chunked_identity) {
-  std::string base;
-  std::vector<std::string> dirs = {"tests/fixtures/", "../tests/fixtures/"};
-  for (auto &d : dirs) {
-    if (fixture_exists(d + "hap1.mov") && fixture_exists(d + "hap1_chunked.mov")) {
-      base = d;
-      break;
-    }
-  }
-  if (base.empty()) {
-    fprintf(stderr, "SKIP (no fixtures) ");
-    return;
-  }
-  HAP_ASSERT(check_chunked_identity(base + "hap1.mov", base + "hap1_chunked.mov", "Hap1"));
-}
-
-HAP_TEST(test_decoder_hapy_chunked_identity) {
-  std::string base;
-  std::vector<std::string> dirs = {"tests/fixtures/", "../tests/fixtures/"};
-  for (auto &d : dirs) {
-    if (fixture_exists(d + "hapy.mov") && fixture_exists(d + "hapy_chunked.mov")) {
-      base = d;
-      break;
-    }
-  }
-  if (base.empty()) {
-    fprintf(stderr, "SKIP (no fixtures) ");
-    return;
-  }
-  HAP_ASSERT(check_chunked_identity(base + "hapy.mov", base + "hapy_chunked.mov", "HapY"));
-}
-
-HAP_TEST(test_decoder_hap5_chunked_identity) {
-  std::string base;
-  std::vector<std::string> dirs = {"tests/fixtures/", "../tests/fixtures/"};
-  for (auto &d : dirs) {
-    if (fixture_exists(d + "hap5.mov") && fixture_exists(d + "hap5_chunked.mov")) {
-      base = d;
-      break;
-    }
-  }
-  if (base.empty()) {
-    fprintf(stderr, "SKIP (no fixtures) ");
-    return;
-  }
-  HAP_ASSERT(check_chunked_identity(base + "hap5.mov", base + "hap5_chunked.mov", "Hap5"));
 }
 
 HAP_TEST(test_decoder_hap1_golden_reference) {
   // Compare decoded frame 0 against a committed golden binary reference.
   // The golden file is the raw decoded BC1 data of hap1.mov frame 0.
-  std::string base;
-  std::vector<std::string> dirs = {"tests/fixtures/", "../tests/fixtures/"};
-  for (auto &d : dirs) {
-    if (fixture_exists(d + "hap1.mov") && fixture_exists(d + "hap1_golden.bin")) {
-      base = d;
-      break;
-    }
-  }
+  std::string base = find_fixture_dir({"hap1.mov", "hap1_golden.bin"});
   if (base.empty()) {
     fprintf(stderr, "SKIP (no golden reference) ");
     return;
@@ -873,149 +737,6 @@ HAP_TEST(test_decoder_hap1_golden_reference) {
   const auto &tex = frame.textures[0];
   HAP_ASSERT_EQ(tex.data.size(), golden.size());
   HAP_ASSERT(memcmp(tex.data.data(), golden.data(), golden.size()) == 0);
-}
-
-
-struct WorkItem {
-  std::atomic<unsigned int> call_count{0};
-};
-
-static void test_work_function(void *p, unsigned int /*index*/) {
-  auto *item = static_cast<WorkItem *>(p);
-  item->call_count.fetch_add(1, std::memory_order_relaxed);
-}
-
-HAP_TEST(test_thread_pool_basic) {
-  auto &pool = InnerThreadPool::instance();
-
-  // The pool should have at least 1 worker
-  HAP_ASSERT(pool.worker_count() >= 1);
-
-  // Verify the thread count matches the formula
-  // max(1, hardware_concurrency - kDefaultWorkers)
-  unsigned int hw = std::thread::hardware_concurrency();
-  unsigned int outer = OuterThreadPool::kDefaultWorkers;
-  unsigned int expected = (hw > outer) ? (hw - outer) : 1;
-  HAP_ASSERT_EQ(pool.worker_count(), expected);
-}
-
-HAP_TEST(test_thread_pool_no_workers_if_single_item) {
-  // A single work item should complete immediately via the calling thread
-  auto &pool = InnerThreadPool::instance();
-
-  WorkItem item;
-  pool.execute(test_work_function, &item, 1);
-
-  HAP_ASSERT_EQ(item.call_count.load(), 1u);
-}
-
-HAP_TEST(test_thread_pool_multi_work_items) {
-  auto &pool = InnerThreadPool::instance();
-
-  WorkItem item;
-  const unsigned int kCount = 100;
-
-  pool.execute(test_work_function, &item, kCount);
-
-  // All work items must have been executed
-  HAP_ASSERT_EQ(item.call_count.load(), kCount);
-}
-
-HAP_TEST(test_thread_pool_no_remaining_state) {
-  // Execute multiple batches to ensure no state leaks between calls
-  auto &pool = InnerThreadPool::instance();
-
-  WorkItem item1;
-  WorkItem item2;
-
-  pool.execute(test_work_function, &item1, 5);
-  HAP_ASSERT_EQ(item1.call_count.load(), 5u);
-
-  pool.execute(test_work_function, &item2, 7);
-  HAP_ASSERT_EQ(item2.call_count.load(), 7u);
-
-  // item1 should not have been called again
-  HAP_ASSERT_EQ(item1.call_count.load(), 5u);
-}
-
-HAP_TEST(test_thread_pool_large_count) {
-  auto &pool = InnerThreadPool::instance();
-
-  // Use a count that exceeds the number of workers to test partitioning
-  const unsigned int kCount = 1000;
-  WorkItem item;
-
-  pool.execute(test_work_function, &item, kCount);
-  HAP_ASSERT_EQ(item.call_count.load(), kCount);
-}
-
-// -----------------------------------------------------------------------
-// Callback contract: verify HapDecode respects the single-chunk contract
-// -----------------------------------------------------------------------
-
-static int callback_invocation_count = 0;
-
-static void tracking_callback(HapDecodeWorkFunction function, void *p,
-                               unsigned int count, void *info) {
-  callback_invocation_count++;
-  // Forward to the inner pool for proper multi-threaded decode
-  hap_inner_decode_callback(function, p, count, info);
-}
-
-static void reset_callback_count() { callback_invocation_count = 0; }
-
-HAP_TEST(test_decoder_callback_not_invoked_for_single_chunk) {
-  // Create an unchunked frame and decode it with our tracking callback
-  uint8_t bc1_block[8] = {0xFF, 0xFF, 0x00, 0x00,
-                           0x00, 0x00, 0x00, 0x00};
-  auto frame = create_unchunked_hap1(bc1_block, sizeof(bc1_block));
-
-  // Decode with the tracking callback via HapDecode directly
-  unsigned int tex_format = 0;
-  unsigned long bytes_used = 0;
-  uint8_t output[1024];
-
-  reset_callback_count();
-
-  unsigned int result = HapDecode(
-      frame.data(), static_cast<unsigned long>(frame.size()), 0,
-      tracking_callback, nullptr, output, sizeof(output),
-      &bytes_used, &tex_format);
-
-  HAP_ASSERT_EQ(result, (unsigned int)HapResult_No_Error);
-
-  // The callback must NOT have been invoked for a single-chunk frame
-  HAP_ASSERT_EQ(callback_invocation_count, 0);
-}
-
-HAP_TEST(test_decoder_callback_invoked_for_multi_chunk) {
-  // Create raw BC1 data (1024 bytes = 128 BC1 blocks), large enough
-  // for HapEncode to produce a Complex (chunked) frame.
-  uint8_t bc1_data[1024];
-  std::memset(bc1_data, 0, sizeof(bc1_data));
-
-  // Encode with 4 chunks
-  auto chunked = create_chunked_frame(bc1_data, sizeof(bc1_data), 4,
-                                       HapTextureFormat_RGB_DXT1,
-                                       HapCompressorSnappy);
-  HAP_ASSERT(!chunked.empty());
-
-  // Decode with the tracking callback via HapDecode directly
-  unsigned int tex_format = 0;
-  unsigned long bytes_used = 0;
-  uint8_t output[4096];
-
-  reset_callback_count();
-
-  unsigned int result = HapDecode(
-      chunked.data(), static_cast<unsigned long>(chunked.size()), 0,
-      tracking_callback, nullptr, output, sizeof(output),
-      &bytes_used, &tex_format);
-
-  HAP_ASSERT_EQ(result, (unsigned int)HapResult_No_Error);
-
-  // The callback MUST have been invoked exactly once for a multi-chunk frame
-  HAP_ASSERT_EQ(callback_invocation_count, 1);
 }
 
 // -----------------------------------------------------------------------

@@ -13,6 +13,7 @@
 #include "core/mmap_reader.h"
 
 #include "test.h"
+#include "test_fixtures.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -39,18 +40,7 @@ void replay(const std::string &path) {
 } // namespace
 
 HAP_TEST(test_fuzz_regressions) {
-  std::vector<std::string> regression_dirs = {
-      "tests/fixtures/fuzz_regressions",
-      "../tests/fixtures/fuzz_regressions",
-  };
-
-  std::string dir_path;
-  for (const auto &d : regression_dirs) {
-    if (access(d.c_str(), F_OK) == 0) {
-      dir_path = d;
-      break;
-    }
-  }
+  std::string dir_path = hap::test::find_fixture_subdir("fuzz_regressions");
 
   if (dir_path.empty()) {
     fprintf(stderr, "SKIP (no fuzz_regressions fixtures found) ");

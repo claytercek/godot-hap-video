@@ -14,6 +14,7 @@
 #include "core/mmap_reader.h"
 
 #include "test.h"
+#include "test_fixtures.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +23,33 @@
 #include <unistd.h>
 
 using namespace hap::core;
+
+// -----------------------------------------------------------------------
+// Helper: resolve + open a fixture, ready for per-test assertions. `found`
+// is false if the fixture file itself is missing (caller should SKIP);
+// `ok` reflects whether the reader+demuxer opened it successfully.
+// -----------------------------------------------------------------------
+namespace {
+struct OpenedFixture {
+  bool found = false;
+  bool ok = false;
+  MmapReader reader;
+  Demuxer demuxer;
+};
+
+OpenedFixture open_fixture(const std::string &filename) {
+  OpenedFixture f;
+  std::string path = hap::test::find_fixture(filename);
+  if (path.empty())
+    return f;
+  f.found = true;
+  f.ok = f.reader.open(path);
+  if (!f.ok)
+    return f;
+  f.ok = f.demuxer.open(f.reader).valid;
+  return f;
+}
+} // namespace
 
 // -----------------------------------------------------------------------
 // Helper: create a temp file from a buffer
@@ -237,134 +265,58 @@ HAP_TEST(test_parse_stsd_unknown_codec) {
 // -----------------------------------------------------------------------
 
 HAP_TEST(test_demuxer_with_fixture) {
-  // Look for test fixture files
-  std::vector<std::string> fixture_paths = {
-      "tests/fixtures/hap1.mov",
-      "../tests/fixtures/hap1.mov",
-  };
-
-  std::string fixture_path;
-  for (const auto &p : fixture_paths) {
-    if (access(p.c_str(), F_OK) == 0) {
-      fixture_path = p;
-      break;
-    }
-  }
-
-  if (fixture_path.empty()) {
+  auto f = open_fixture("hap1.mov");
+  if (!f.found) {
     fprintf(stderr, "SKIP (no fixture file found) ");
     return;
   }
-
-  MmapReader reader;
-  HAP_ASSERT(reader.open(fixture_path));
-
-  Demuxer demuxer;
-  auto result = demuxer.open(reader);
-  HAP_ASSERT(result.valid);
-  HAP_ASSERT(demuxer.track_info().fourcc == FCC_Hap1);
-  HAP_ASSERT(demuxer.track_info().width > 0);
-  HAP_ASSERT(demuxer.track_info().height > 0);
-  HAP_ASSERT(demuxer.track_info().frame_count > 0);
-  HAP_ASSERT(demuxer.track_info().frame_rate > 0.0);
+  HAP_ASSERT(f.ok);
+  HAP_ASSERT(f.demuxer.track_info().fourcc == FCC_Hap1);
+  HAP_ASSERT(f.demuxer.track_info().width > 0);
+  HAP_ASSERT(f.demuxer.track_info().height > 0);
+  HAP_ASSERT(f.demuxer.track_info().frame_count > 0);
+  HAP_ASSERT(f.demuxer.track_info().frame_rate > 0.0);
 }
 
 HAP_TEST(test_demuxer_with_hap5_fixture) {
-  std::vector<std::string> fixture_paths = {
-      "tests/fixtures/hap5.mov",
-      "../tests/fixtures/hap5.mov",
-  };
-
-  std::string fixture_path;
-  for (const auto &p : fixture_paths) {
-    if (access(p.c_str(), F_OK) == 0) {
-      fixture_path = p;
-      break;
-    }
-  }
-
-  if (fixture_path.empty()) {
+  auto f = open_fixture("hap5.mov");
+  if (!f.found) {
     fprintf(stderr, "SKIP (no hap5 fixture) ");
     return;
   }
-
-  MmapReader reader;
-  HAP_ASSERT(reader.open(fixture_path));
-
-  Demuxer demuxer;
-  auto result = demuxer.open(reader);
-  HAP_ASSERT(result.valid);
-  HAP_ASSERT(demuxer.track_info().fourcc == FCC_Hap5);
-  HAP_ASSERT(demuxer.track_info().width > 0);
-  HAP_ASSERT(demuxer.track_info().height > 0);
-  HAP_ASSERT(demuxer.track_info().frame_count > 0);
+  HAP_ASSERT(f.ok);
+  HAP_ASSERT(f.demuxer.track_info().fourcc == FCC_Hap5);
+  HAP_ASSERT(f.demuxer.track_info().width > 0);
+  HAP_ASSERT(f.demuxer.track_info().height > 0);
+  HAP_ASSERT(f.demuxer.track_info().frame_count > 0);
 }
 
 HAP_TEST(test_demuxer_with_hap7_fixture) {
-  std::vector<std::string> fixture_paths = {
-      "tests/fixtures/hap7.mov",
-      "../tests/fixtures/hap7.mov",
-  };
-
-  std::string fixture_path;
-  for (const auto &p : fixture_paths) {
-    if (access(p.c_str(), F_OK) == 0) {
-      fixture_path = p;
-      break;
-    }
-  }
-
-  if (fixture_path.empty()) {
+  auto f = open_fixture("hap7.mov");
+  if (!f.found) {
     fprintf(stderr, "SKIP (no hap7 fixture) ");
     return;
   }
-
-  MmapReader reader;
-  HAP_ASSERT(reader.open(fixture_path));
-
-  Demuxer demuxer;
-  auto result = demuxer.open(reader);
-  HAP_ASSERT(result.valid);
-  HAP_ASSERT(demuxer.track_info().fourcc == FCC_Hap7);
-  HAP_ASSERT(demuxer.track_info().width > 0);
-  HAP_ASSERT(demuxer.track_info().height > 0);
-  HAP_ASSERT(demuxer.track_info().frame_count > 0);
-  fprintf(stderr, "OK (demuxed Hap7: %ux%u, %u frames) ",
-          demuxer.track_info().width, demuxer.track_info().height, demuxer.track_info().frame_count);
+  HAP_ASSERT(f.ok);
+  HAP_ASSERT(f.demuxer.track_info().fourcc == FCC_Hap7);
+  HAP_ASSERT(f.demuxer.track_info().width > 0);
+  HAP_ASSERT(f.demuxer.track_info().height > 0);
+  HAP_ASSERT(f.demuxer.track_info().frame_count > 0);
 }
 
 HAP_TEST(test_demuxer_audio_skip) {
-  // Look for audio fixture file (MOV with both video and audio tracks)
-  std::vector<std::string> fixture_paths = {
-      "tests/fixtures/hap1_audio.mov",
-      "../tests/fixtures/hap1_audio.mov",
-  };
-
-  std::string fixture_path;
-  for (const auto &p : fixture_paths) {
-    if (access(p.c_str(), F_OK) == 0) {
-      fixture_path = p;
-      break;
-    }
-  }
-
-  if (fixture_path.empty()) {
+  // MOV with both video and audio tracks: demuxer must find and return
+  // the video track despite the audio track's presence.
+  auto f = open_fixture("hap1_audio.mov");
+  if (!f.found) {
     fprintf(stderr, "SKIP (no audio fixture file found) ");
     return;
   }
-
-  MmapReader reader;
-  HAP_ASSERT(reader.open(fixture_path));
-
-  Demuxer demuxer;
-  auto result = demuxer.open(reader);
-  
-  // Assert: demuxer finds and returns the video track despite audio track presence
-  HAP_ASSERT(result.valid);
-  HAP_ASSERT(demuxer.track_info().fourcc == FCC_Hap1);
-  HAP_ASSERT(demuxer.track_info().width > 0);
-  HAP_ASSERT(demuxer.track_info().height > 0);
-  HAP_ASSERT(demuxer.track_info().frame_count > 0);
+  HAP_ASSERT(f.ok);
+  HAP_ASSERT(f.demuxer.track_info().fourcc == FCC_Hap1);
+  HAP_ASSERT(f.demuxer.track_info().width > 0);
+  HAP_ASSERT(f.demuxer.track_info().height > 0);
+  HAP_ASSERT(f.demuxer.track_info().frame_count > 0);
 }
 
 // -----------------------------------------------------------------------

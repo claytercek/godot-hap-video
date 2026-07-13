@@ -10,11 +10,14 @@
 #include "core/retire_ring.h"
 #include "core/thread_pool.h"
 
+#include "hap.h"
 #include "test.h"
+#include "test_hap_frames.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <thread>
 #include <vector>
 
@@ -352,6 +355,159 @@ HAP_TEST(outer_times_inner_stays_within_hardware_concurrency) {
   // (the two pools' worker threads never together exceed hardware
   // concurrency).
   HAP_ASSERT(outer + inner <= hw || inner == 1);
+}
+
+// -----------------------------------------------------------------------
+// InnerThreadPool: HapDecode work-batch dispatch (moved from
+// test_decoder.cpp -- these exercise the same InnerThreadPool as the
+// tests above, not decoder-specific behavior)
+// -----------------------------------------------------------------------
+
+struct WorkItem {
+  std::atomic<unsigned int> call_count{0};
+};
+
+static void test_work_function(void *p, unsigned int /*index*/) {
+  auto *item = static_cast<WorkItem *>(p);
+  item->call_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+HAP_TEST(test_thread_pool_basic) {
+  auto &pool = InnerThreadPool::instance();
+
+  // The pool should have at least 1 worker
+  HAP_ASSERT(pool.worker_count() >= 1);
+
+  // Verify the thread count matches the formula
+  // max(1, hardware_concurrency - kDefaultWorkers)
+  unsigned int hw = std::thread::hardware_concurrency();
+  unsigned int outer = OuterThreadPool::kDefaultWorkers;
+  unsigned int expected = (hw > outer) ? (hw - outer) : 1;
+  HAP_ASSERT_EQ(pool.worker_count(), expected);
+}
+
+HAP_TEST(test_thread_pool_no_workers_if_single_item) {
+  // A single work item should complete immediately via the calling thread
+  auto &pool = InnerThreadPool::instance();
+
+  WorkItem item;
+  pool.execute(test_work_function, &item, 1);
+
+  HAP_ASSERT_EQ(item.call_count.load(), 1u);
+}
+
+HAP_TEST(test_thread_pool_multi_work_items) {
+  auto &pool = InnerThreadPool::instance();
+
+  WorkItem item;
+  const unsigned int kCount = 100;
+
+  pool.execute(test_work_function, &item, kCount);
+
+  // All work items must have been executed
+  HAP_ASSERT_EQ(item.call_count.load(), kCount);
+}
+
+HAP_TEST(test_thread_pool_no_remaining_state) {
+  // Execute multiple batches to ensure no state leaks between calls
+  auto &pool = InnerThreadPool::instance();
+
+  WorkItem item1;
+  WorkItem item2;
+
+  pool.execute(test_work_function, &item1, 5);
+  HAP_ASSERT_EQ(item1.call_count.load(), 5u);
+
+  pool.execute(test_work_function, &item2, 7);
+  HAP_ASSERT_EQ(item2.call_count.load(), 7u);
+
+  // item1 should not have been called again
+  HAP_ASSERT_EQ(item1.call_count.load(), 5u);
+}
+
+HAP_TEST(test_thread_pool_large_count) {
+  auto &pool = InnerThreadPool::instance();
+
+  // Use a count that exceeds the number of workers to test partitioning
+  const unsigned int kCount = 1000;
+  WorkItem item;
+
+  pool.execute(test_work_function, &item, kCount);
+  HAP_ASSERT_EQ(item.call_count.load(), kCount);
+}
+
+// -----------------------------------------------------------------------
+// Callback contract: verify HapDecode respects the single-chunk contract
+// (moved from test_decoder.cpp -- this is thread-pool dispatch behavior,
+// not decode-correctness behavior)
+// -----------------------------------------------------------------------
+
+using hap::test::create_chunked_frame;
+using hap::test::create_unchunked_hap1;
+
+static int callback_invocation_count = 0;
+
+static void tracking_callback(HapDecodeWorkFunction function, void *p,
+                               unsigned int count, void *info) {
+  callback_invocation_count++;
+  // Forward to the inner pool for proper multi-threaded decode
+  hap_inner_decode_callback(function, p, count, info);
+}
+
+static void reset_callback_count() { callback_invocation_count = 0; }
+
+HAP_TEST(test_decoder_callback_not_invoked_for_single_chunk) {
+  // Create an unchunked frame and decode it with our tracking callback
+  uint8_t bc1_block[8] = {0xFF, 0xFF, 0x00, 0x00,
+                           0x00, 0x00, 0x00, 0x00};
+  auto frame = create_unchunked_hap1(bc1_block, sizeof(bc1_block));
+
+  // Decode with the tracking callback via HapDecode directly
+  unsigned int tex_format = 0;
+  unsigned long bytes_used = 0;
+  uint8_t output[1024];
+
+  reset_callback_count();
+
+  unsigned int result = HapDecode(
+      frame.data(), static_cast<unsigned long>(frame.size()), 0,
+      tracking_callback, nullptr, output, sizeof(output),
+      &bytes_used, &tex_format);
+
+  HAP_ASSERT_EQ(result, (unsigned int)HapResult_No_Error);
+
+  // The callback must NOT have been invoked for a single-chunk frame
+  HAP_ASSERT_EQ(callback_invocation_count, 0);
+}
+
+HAP_TEST(test_decoder_callback_invoked_for_multi_chunk) {
+  // Create raw BC1 data (1024 bytes = 128 BC1 blocks), large enough
+  // for HapEncode to produce a Complex (chunked) frame.
+  uint8_t bc1_data[1024];
+  std::memset(bc1_data, 0, sizeof(bc1_data));
+
+  // Encode with 4 chunks
+  auto chunked = create_chunked_frame(bc1_data, sizeof(bc1_data), 4,
+                                       HapTextureFormat_RGB_DXT1,
+                                       HapCompressorSnappy);
+  HAP_ASSERT(!chunked.empty());
+
+  // Decode with the tracking callback via HapDecode directly
+  unsigned int tex_format = 0;
+  unsigned long bytes_used = 0;
+  uint8_t output[4096];
+
+  reset_callback_count();
+
+  unsigned int result = HapDecode(
+      chunked.data(), static_cast<unsigned long>(chunked.size()), 0,
+      tracking_callback, nullptr, output, sizeof(output),
+      &bytes_used, &tex_format);
+
+  HAP_ASSERT_EQ(result, (unsigned int)HapResult_No_Error);
+
+  // The callback MUST have been invoked exactly once for a multi-chunk frame
+  HAP_ASSERT_EQ(callback_invocation_count, 1);
 }
 
 // -----------------------------------------------------------------------

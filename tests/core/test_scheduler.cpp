@@ -8,6 +8,7 @@
 #include "core/decode_scheduler.h"
 
 #include "test.h"
+#include "test_fixtures.h"
 
 #include <atomic>
 #include <chrono>
@@ -18,23 +19,9 @@
 #include <vector>
 
 using namespace hap::core;
+using hap::test::find_fixture;
 
 namespace {
-
-std::string find_fixture(const std::string &name) {
-  std::vector<std::string> candidates = {
-      "tests/fixtures/" + name,
-      "../tests/fixtures/" + name,
-  };
-  for (const auto &p : candidates) {
-    FILE *f = fopen(p.c_str(), "rb");
-    if (f) {
-      fclose(f);
-      return p;
-    }
-  }
-  return "";
-}
 
 bool wait_for(std::function<bool()> pred, int timeout_ms = 5000) {
   auto start = std::chrono::steady_clock::now();
@@ -46,6 +33,23 @@ bool wait_for(std::function<bool()> pred, int timeout_ms = 5000) {
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
+  return true;
+}
+
+// Poll `pred` every ~1ms for `duration_ms`, failing fast the moment it
+// doesn't hold. Use this in place of "sleep a fixed duration, then take a
+// single sample" when the assertion is that a condition holds throughout
+// a window -- a single post-sleep sample can miss a violation that
+// happened and self-corrected inside the sleep.
+bool holds_for(std::function<bool()> pred, int duration_ms) {
+  auto start = std::chrono::steady_clock::now();
+  do {
+    if (!pred())
+      return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  } while (std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - start)
+               .count() < duration_ms);
   return true;
 }
 
@@ -375,8 +379,10 @@ HAP_TEST(scheduler_reverse_playback_stops_cleanly_at_frame_zero) {
 
   // Give the scheduler a bounded window to (mis)behave: it must not
   // produce another frame after 0 (no wraparound, no duplicate spam).
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  HAP_ASSERT(scheduler.queue().peek(&idx) == nullptr);
+  // Poll throughout the window rather than sleeping once and sampling at
+  // the end, so a spurious frame that appears and is then popped mid-sleep
+  // isn't missed.
+  HAP_ASSERT(holds_for([&]() { return scheduler.queue().peek(&idx) == nullptr; }, 50));
 }
 
 HAP_TEST(scheduler_destroyed_immediately_after_open_does_not_hang_or_crash) {
