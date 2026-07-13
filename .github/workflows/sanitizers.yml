@@ -1,5 +1,13 @@
 name: Sanitizers
 
+# MemorySanitizer is intentionally not run: it requires an instrumented
+# libc++/libc (and ideally an instrumented Godot/godot-cpp) to avoid false
+# positives from uninstrumented dependencies, which isn't set up here. Not
+# in scope for this workflow.
+#
+# oss-fuzz integration is a recorded future option, not implemented here;
+# fuzzing today is local-only via scripts/fuzz_demuxer.sh.
+
 on:
   push:
     branches: [main]
