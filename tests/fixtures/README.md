@@ -88,7 +88,27 @@ output), use the AVF Batch Exporter (macOS):
 File: `hapm.mov` (if available) — the HapM dual-texture variant also
 requires the AVF Batch Exporter:
 
-1. **Codec**: `Hap Q Alpha`, **Compressor**: `Snappy`, **Chunks**: `1`.
+1. **Source material**: Create a 640×360, 30 fps, ~2 second clip **with a
+   non-trivial alpha channel** (e.g. ProRes 4444 with varying
+   transparency). This matters: the HapM decode test must assert alpha is
+   non-trivial — the exact regression the reference Unity plugin shipped
+   (it decoded only texture 0 and silently dropped HapM's alpha) — so a
+   fully-opaque source produces a useless fixture.
+2. **Vidvox AVF Batch Exporter**:
+   - Drag the source clip into the batch list.
+   - **Codec**: `Hap Q Alpha`, **Compressor**: `Snappy`, **Chunks**: `1`.
+   - Export.
+3. **Verify** the FourCC:
+
+   ```bash
+   ffprobe -v 0 -show_streams hapm.mov | grep codec_tag
+   # expected: codec_tag_string=HapM
+   ```
+
+A chunked HapM (`hapm_chunked.mov`, **Chunks**: `4`) is a conditional
+extra: per-texture chunk counts may differ in HapM, and a real chunked
+file would settle that otherwise-untested path. Place it alongside if the
+exporter produces one.
 
 ## Golden-frame regression tests
 
