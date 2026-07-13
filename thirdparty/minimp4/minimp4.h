@@ -268,9 +268,31 @@ typedef struct
     unsigned chunk_count;
     MP4D_file_offset_t *chunk_offset;
 
+    // sample_to_chunk() resume point for the last query, valid whenever a
+    // caller queries nsample in non-decreasing order (the only pattern any
+    // caller in this codebase uses -- see sample_to_chunk()'s comment).
+    unsigned stc_cache_group;
+    unsigned stc_cache_nc;
+    unsigned stc_cache_sum;
+
+    // MP4D_frame_offset()'s in-chunk byte-offset resume point -- see that
+    // function's comment. Independent of stc_cache_* above: this caches
+    // the accumulated offset *within whatever chunk the previous query
+    // landed in*, which matters even when sample_to_chunk() never has to
+    // rescan (e.g. a single giant chunk holding every sample).
+    unsigned fo_cache_valid;
+    unsigned fo_cache_nsample;
+    MP4D_file_offset_t fo_cache_offset;
+
 #if MP4D_TIMESTAMPS_SUPPORTED
     unsigned *timestamp;
     unsigned *duration;
+    // Allocated length of timestamp/duration, tracked separately from any
+    // publicly exposed sample count: a malformed file's stsz sample_count
+    // can exceed the total sample count its own stts box declared, and
+    // MP4D_frame_offset() must bound-check against what was actually
+    // allocated, not what stsz merely claims.
+    unsigned timestamp_count;
 #endif
 
 } MP4D_track_t;
@@ -2905,6 +2927,7 @@ broken_android_meta_hack:
 #if MP4D_TIMESTAMPS_SUPPORTED
                 MALLOC(unsigned int*, tr->timestamp, ts_count*4);
                 MALLOC(unsigned int*, tr->duration, ts_count*4);
+                tr->timestamp_count = ts_count;
 #endif
 
                 for (i = 0; i < count; i++)
@@ -2943,6 +2966,7 @@ broken_android_meta_hack:
                         {
                             ERROR("out of memory");
                         }
+                        tr->timestamp_count = ts_count;
                     }
                     for (j = 0; j < sc; j++)
                     {
@@ -3002,6 +3026,9 @@ broken_android_meta_hack:
             break;
 
         case BOX_mdhd:
+            // Same depth-0 use_track_flag gap as BOX_stsz above.
+            if (!tr)
+                break;
             SKIP(((FullAtomVersionAndFlags >> 24) == 1) ? 8 + 8 : 4 + 4);
             tr->timescale = READ(4);
             tr->duration_hi = ((FullAtomVersionAndFlags >> 24) == 1) ? READ(4) : 0;
@@ -3304,8 +3331,7 @@ broken_android_meta_hack:
 */
 static int sample_to_chunk(MP4D_track_t *tr, unsigned nsample, unsigned *nfirst_sample_in_chunk)
 {
-    unsigned chunk_group = 0, nc;
-    unsigned sum = 0;
+    unsigned chunk_group, nc, sum;
     *nfirst_sample_in_chunk = 0;
     if (tr->chunk_count == 0)
     {
@@ -3320,7 +3346,30 @@ static int sample_to_chunk(MP4D_track_t *tr, unsigned nsample, unsigned *nfirst_
     {
         return 0;
     }
-    for (nc = 0; nc < tr->chunk_count; nc++)
+
+    // Every caller in this codebase (Demuxer::open) queries nsample in
+    // strictly increasing order, once per sample -- rescanning from nc=0
+    // every time (the original behavior, and its own "TODO: this can be
+    // calculated once per file" above) makes a full demux O(chunk_count *
+    // sample_count). Fuzzing found this as a multi-second hang from a
+    // crafted file with a large-but-not-otherwise-invalid chunk count.
+    // Resume from the last call's stopping point whenever this query
+    // doesn't need to look earlier than it did.
+    if (nsample >= tr->stc_cache_sum && tr->stc_cache_nc < tr->chunk_count)
+    {
+        chunk_group = tr->stc_cache_group;
+        nc = tr->stc_cache_nc;
+        sum = tr->stc_cache_sum;
+        *nfirst_sample_in_chunk = sum;
+    }
+    else
+    {
+        chunk_group = 0;
+        nc = 0;
+        sum = 0;
+    }
+
+    for (; nc < tr->chunk_count; nc++)
     {
         if (chunk_group + 1 < tr->sample_to_chunk_count     // stuck at last entry till EOF
             && nc + 1 ==    // Chunks counted starting with '1'
@@ -3331,11 +3380,19 @@ static int sample_to_chunk(MP4D_track_t *tr, unsigned nsample, unsigned *nfirst_
 
         sum += tr->sample_to_chunk[chunk_group].samples_per_chunk;
         if (nsample < sum)
+        {
+            tr->stc_cache_group = chunk_group;
+            tr->stc_cache_nc = nc + 1;
+            tr->stc_cache_sum = sum;
             return nc;
+        }
 
-        // TODO: this can be calculated once per file
         *nfirst_sample_in_chunk = sum;
     }
+
+    tr->stc_cache_group = chunk_group;
+    tr->stc_cache_nc = nc;
+    tr->stc_cache_sum = sum;
     return -1;
 }
 
@@ -3353,7 +3410,23 @@ MP4D_file_offset_t MP4D_frame_offset(const MP4D_demux_t *mp4, unsigned ntrack, u
         return 0;
     }
 
-    offset = tr->chunk_offset[nchunk];
+    // Resuming from a per-track cache the same way sample_to_chunk() does
+    // above: summing entry_size from the chunk's first sample up to
+    // `nsample` on every single call makes a demux with a few large chunks
+    // (e.g. one giant chunk holding every sample) O(chunk_size^2) even
+    // though sample_to_chunk() itself never has to rescan in that case.
+    // Fuzzing found this as a multi-second hang distinct from (and not
+    // fixed by) the sample_to_chunk() memoization.
+    if (tr->fo_cache_valid && nsample == tr->fo_cache_nsample + 1 && ns <= tr->fo_cache_nsample)
+    {
+        offset = tr->fo_cache_offset;
+        ns = nsample;
+    }
+    else
+    {
+        offset = tr->chunk_offset[nchunk];
+    }
+
     for (; ns < nsample; ns++)
     {
         offset += tr->entry_size[ns];
@@ -3361,14 +3434,20 @@ MP4D_file_offset_t MP4D_frame_offset(const MP4D_demux_t *mp4, unsigned ntrack, u
 
     *frame_bytes = tr->entry_size[ns];
 
+    tr->fo_cache_valid = 1;
+    tr->fo_cache_nsample = nsample;
+    tr->fo_cache_offset = offset + tr->entry_size[ns];
+
     if (timestamp)
     {
 #if MP4D_TIMESTAMPS_SUPPORTED
         // Hardening fix: a track can have samples (from stsz) but no stts
         // box at all, leaving tr->timestamp/tr->duration NULL from the
-        // MP4D_track_t's zero-init -- fuzzer found this as a null-pointer
-        // deref from a malformed file with no timing box.
-        *timestamp = tr->timestamp ? tr->timestamp[ns] : 0;
+        // MP4D_track_t's zero-init; or a malformed file's stsz sample_count
+        // can simply exceed the total sample count its own stts box
+        // declared, leaving `ns` past the end of both arrays even though
+        // they're non-NULL. Fuzzer found both as reads on a malformed file.
+        *timestamp = (tr->timestamp && ns < tr->timestamp_count) ? tr->timestamp[ns] : 0;
 #else
         *timestamp = 0;
 #endif
@@ -3376,7 +3455,7 @@ MP4D_file_offset_t MP4D_frame_offset(const MP4D_demux_t *mp4, unsigned ntrack, u
     if (duration)
     {
 #if MP4D_TIMESTAMPS_SUPPORTED
-        *duration = tr->duration ? tr->duration[ns] : 0;
+        *duration = (tr->duration && ns < tr->timestamp_count) ? tr->duration[ns] : 0;
 #else
         *duration = 0;
 #endif
