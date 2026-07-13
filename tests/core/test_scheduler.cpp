@@ -408,4 +408,72 @@ HAP_TEST(scheduler_destroyed_immediately_after_open_does_not_hang_or_crash) {
              std::future_status::ready);
 }
 
+HAP_TEST(scheduler_concurrent_seeks_never_tear_target_and_direction) {
+  std::string path = find_fixture("hap1.mov");
+  if (path.empty()) {
+    fprintf(stderr, "SKIP (no fixture) ");
+    return;
+  }
+
+  DecodeScheduler scheduler;
+  std::atomic<bool> opened{false};
+  scheduler.open_async(
+      path, [&](bool ok, const std::string &) { opened.store(ok); });
+  HAP_ASSERT(wait_for([&]() { return opened.load(); }));
+
+  uint32_t frame_count = scheduler.track_info().frame_count;
+  if (frame_count < 12) {
+    fprintf(stderr, "SKIP (fixture too short) ");
+    return;
+  }
+
+  // Two coherent (target, direction) pairs. request_frame writes target,
+  // direction, and the pending flag in one critical section, so a torn
+  // application -- one call's target paired with the other's direction,
+  // e.g. (5, backward) or (10, forward) -- must be impossible. Two threads
+  // hammer the two pairs with no spacing to maximize interleaving.
+  const uint32_t kTargetA = 5;  // forward  -> queue fills 5, 6, 7, ...
+  const uint32_t kTargetB = 10; // backward -> queue fills 10, 9, 8, ...
+
+  std::atomic<bool> stop{false};
+  std::thread a([&]() {
+    while (!stop.load(std::memory_order_relaxed))
+      scheduler.request_frame(kTargetA, /*forward=*/true);
+  });
+  std::thread b([&]() {
+    while (!stop.load(std::memory_order_relaxed))
+      scheduler.request_frame(kTargetB, /*forward=*/false);
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  stop.store(true);
+  a.join();
+  b.join();
+
+  // Let the last applied seek's fill run to completion, then inspect the
+  // now-static queue (no consumer re-arms prefetch, so it won't change).
+  OuterThreadPool::instance().wait_idle();
+
+  uint32_t first = 0;
+  const DecodedFrame *f = scheduler.queue().peek(&first);
+  HAP_ASSERT(f != nullptr);
+  // The oldest frame is the winning pair's target; the direction of the
+  // frames after it must match that same pair. 5-descending or
+  // 10-ascending would mean a torn (target, direction) pair.
+  HAP_ASSERT(first == kTargetA || first == kTargetB);
+  bool expect_forward = (first == kTargetA);
+
+  scheduler.queue().pop();
+  uint32_t prev = first;
+  uint32_t next = 0;
+  while (scheduler.queue().peek(&next) != nullptr) {
+    if (expect_forward)
+      HAP_ASSERT_EQ(next, prev + 1);
+    else
+      HAP_ASSERT_EQ(next, prev - 1);
+    prev = next;
+    scheduler.queue().pop();
+  }
+}
+
 int main() { return hap::test::run_all(); }

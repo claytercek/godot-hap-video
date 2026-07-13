@@ -9,7 +9,9 @@
 #include "outer_thread_pool.h"
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
 
 namespace hap {
@@ -92,7 +94,10 @@ public:
 
 private:
   void fill_step();
-  void schedule_fill_locked_if_needed();
+  /// Submit a fill_step to the outer pool unless one is already queued or
+  /// running for this stream. Takes mutex_ internally to test/set
+  /// fill_scheduled_.
+  void schedule_fill_if_needed();
 
   MmapReader mmap_;
   Demuxer demuxer_;
@@ -100,28 +105,38 @@ private:
   FrameQueue queue_{4};
 
   uint64_t stream_id_;
+
+  // Lock-free polling flags for other threads (open status). These are the
+  // only cross-thread reads that must not block, so they stay atomic.
   std::atomic<bool> opened_{false};
   std::atomic<bool> open_failed_{false};
 
-  // Decode cursor: next frame index the fill step will decode.
-  std::atomic<uint32_t> cursor_{0};
+  // All seek/cursor state below is guarded by mutex_. Grouping it under one
+  // lock closes the tearing hazard where two concurrent request_frame()
+  // calls could interleave a target from one with a direction from the
+  // other: request_frame() writes target+forward+pending in one critical
+  // section, and fill_step() consumes them in one critical section.
+  std::mutex mutex_;
 
-  // Pending seek target, applied by the next fill_step invocation.
-  std::atomic<bool> seek_pending_{false};
-  std::atomic<uint32_t> seek_target_{0};
-  std::atomic<bool> seek_forward_{true};
+  // Pending seek, applied by the next fill_step invocation.
+  bool seek_pending_ = false;
+  uint32_t seek_target_ = 0;
+  bool seek_forward_ = true;
+
+  // Decode cursor: next frame index the fill step will decode.
+  uint32_t cursor_ = 0;
 
   // Active decode direction, latched from seek_forward_ when a pending
   // seek is applied in fill_step().
-  std::atomic<bool> forward_{true};
+  bool forward_ = true;
 
   // True once a reverse fill has decoded frame 0 -- stops fill_step from
   // underflowing cursor_ (unsigned) by re-decoding frame 0 forever.
-  std::atomic<bool> reverse_exhausted_{false};
+  bool reverse_exhausted_ = false;
 
   // True while a fill_step is queued or running for this stream, so
   // notify_capacity_available()/request_frame() don't over-submit.
-  std::atomic<bool> fill_scheduled_{false};
+  bool fill_scheduled_ = false;
 };
 
 } // namespace core

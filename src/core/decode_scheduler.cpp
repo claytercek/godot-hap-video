@@ -46,49 +46,71 @@ void DecodeScheduler::open_async(
 }
 
 void DecodeScheduler::request_frame(uint32_t frame_index, bool forward) {
-  seek_target_.store(frame_index, std::memory_order_relaxed);
-  seek_forward_.store(forward, std::memory_order_relaxed);
-  seek_pending_.store(true, std::memory_order_release);
-  schedule_fill_locked_if_needed();
+  {
+    // Target + direction + pending flag land in one critical section, so a
+    // concurrent request_frame() can only ever leave a coherent pair
+    // behind -- never this call's target with the other's direction.
+    std::lock_guard<std::mutex> lock(mutex_);
+    seek_target_ = frame_index;
+    seek_forward_ = forward;
+    seek_pending_ = true;
+  }
+  schedule_fill_if_needed();
 }
 
 void DecodeScheduler::notify_capacity_available() {
-  schedule_fill_locked_if_needed();
+  schedule_fill_if_needed();
 }
 
-void DecodeScheduler::schedule_fill_locked_if_needed() {
+void DecodeScheduler::schedule_fill_if_needed() {
   if (!opened_.load(std::memory_order_acquire))
     return;
-  bool expected = false;
-  if (!fill_scheduled_.compare_exchange_strong(expected, true))
-    return; // already scheduled/in flight
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (fill_scheduled_)
+      return; // already scheduled/in flight
+    fill_scheduled_ = true;
+  }
   OuterThreadPool::instance().submit_for_stream(stream_id_,
                                                 [this]() { fill_step(); });
 }
 
 void DecodeScheduler::fill_step() {
-  // Apply a pending seek: drain stale prefetched frames and retarget the
-  // cursor. Runs before this fill step decodes anything, honoring
-  // "queue-behind" — any decode that was already in flight completed
-  // before this job ran (outer pool serializes per-stream jobs), and the
-  // latest seek always wins because seek_target_ was simply overwritten.
-  if (seek_pending_.exchange(false, std::memory_order_acq_rel)) {
-    queue_.drain();
-    cursor_.store(seek_target_.load(std::memory_order_relaxed),
-                  std::memory_order_relaxed);
-    forward_.store(seek_forward_.load(std::memory_order_relaxed),
-                   std::memory_order_relaxed);
-    reverse_exhausted_.store(false, std::memory_order_relaxed);
+  // Phase 1: under the lock, consume any pending seek and snapshot the
+  // cursor state. Only fill_step mutates cursor_/forward_/reverse_exhausted_
+  // and the outer pool serializes fill_steps per stream, so the snapshot
+  // stays valid across the unlocked decode below. Honors "queue-behind":
+  // any decode already in flight finished before this job ran, and the
+  // latest seek wins because request_frame simply overwrote the target.
+  bool do_drain = false;
+  uint32_t frame_index;
+  bool forward;
+  bool reverse_exhausted;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (seek_pending_) {
+      seek_pending_ = false;
+      cursor_ = seek_target_;
+      forward_ = seek_forward_;
+      reverse_exhausted_ = false;
+      do_drain = true;
+    }
+    frame_index = cursor_;
+    forward = forward_;
+    reverse_exhausted = reverse_exhausted_;
   }
 
-  bool forward = forward_.load(std::memory_order_relaxed);
-  const auto &samples = demuxer_.samples();
-  uint32_t frame_index = cursor_.load(std::memory_order_relaxed);
+  // Drain stale prefetched frames outside the lock (the queue is
+  // self-synchronized).
+  if (do_drain)
+    queue_.drain();
 
+  // Phase 2: attempt a single decode without holding mutex_ -- decode() and
+  // the queue operations must never run under the seek lock.
+  const auto &samples = demuxer_.samples();
   bool decoded_one = false;
   bool can_decode = frame_index < samples.size() && !queue_.full() &&
-                     (forward ||
-                      !reverse_exhausted_.load(std::memory_order_relaxed));
+                    (forward || !reverse_exhausted);
   if (can_decode) {
     const uint8_t *sample = demuxer_.sample_data(mmap_, frame_index);
     if (sample) {
@@ -97,35 +119,50 @@ void DecodeScheduler::fill_step() {
         if (decoder_.decode(sample, samples[frame_index].size, *slot)) {
           queue_.commit_write();
           decoded_one = true;
-          if (forward) {
-            cursor_.store(frame_index + 1, std::memory_order_relaxed);
-          } else if (frame_index > 0) {
-            cursor_.store(frame_index - 1, std::memory_order_relaxed);
-          } else {
-            // Reached the start of the stream going backward: cursor_ is
-            // unsigned, so it must not decrement past 0. Latch a flag
-            // instead of storing a sentinel, so a later forward request
-            // still resumes correctly from frame 0.
-            reverse_exhausted_.store(true, std::memory_order_relaxed);
-          }
         }
       }
     }
   }
 
-  bool has_more_in_direction =
-      forward ? cursor_.load(std::memory_order_relaxed) < samples.size()
-              : !reverse_exhausted_.load(std::memory_order_relaxed);
-  bool more_to_do = decoded_one && !queue_.full() && has_more_in_direction;
-  more_to_do = more_to_do || seek_pending_.load(std::memory_order_acquire);
+  bool queue_full = queue_.full();
 
-  if (more_to_do) {
-    // Re-submit for another round; still serialized behind any other
-    // stream jobs, but for this stream it's simply the next fill step.
+  // Phase 3: under the lock, advance the cursor from the snapshot and decide
+  // whether to re-submit. A seek that arrived during the decode wins on the
+  // next fill_step, which re-consumes seek_pending_ and overwrites cursor_.
+  bool resubmit = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (decoded_one) {
+      if (forward) {
+        cursor_ = frame_index + 1;
+      } else if (frame_index > 0) {
+        cursor_ = frame_index - 1;
+      } else {
+        // Reached the start of the stream going backward: cursor_ is
+        // unsigned, so it must not decrement past 0. Latch a flag instead
+        // of storing a sentinel, so a later forward request still resumes
+        // correctly from frame 0.
+        reverse_exhausted_ = true;
+      }
+    }
+
+    bool has_more_in_direction =
+        forward ? cursor_ < samples.size() : !reverse_exhausted_;
+    bool more_to_do = decoded_one && !queue_full && has_more_in_direction;
+    more_to_do = more_to_do || seek_pending_;
+
+    if (more_to_do) {
+      resubmit = true; // fill_scheduled_ stays true
+    } else {
+      fill_scheduled_ = false;
+    }
+  }
+
+  if (resubmit) {
+    // Re-submit for another round; still serialized behind any other stream
+    // jobs, but for this stream it's simply the next fill step.
     OuterThreadPool::instance().submit_for_stream(
         stream_id_, [this]() { fill_step(); });
-  } else {
-    fill_scheduled_.store(false, std::memory_order_release);
   }
 }
 
