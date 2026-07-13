@@ -126,8 +126,12 @@ def _gen_gdextension(target, source, env):
         ("macos.release", "./macos/lib{n}.macos.template_release.dylib"),
         ("windows.debug.x86_64", "./windows/lib{n}.windows.template_debug.x86_64.dll"),
         ("windows.release.x86_64", "./windows/lib{n}.windows.template_release.x86_64.dll"),
+        ("windows.debug.arm64", "./windows/lib{n}.windows.template_debug.arm64.dll"),
+        ("windows.release.arm64", "./windows/lib{n}.windows.template_release.arm64.dll"),
         ("linux.debug.x86_64", "./linux/lib{n}.linux.template_debug.x86_64.so"),
         ("linux.release.x86_64", "./linux/lib{n}.linux.template_release.x86_64.so"),
+        ("linux.debug.arm64", "./linux/lib{n}.linux.template_debug.arm64.so"),
+        ("linux.release.arm64", "./linux/lib{n}.linux.template_release.arm64.so"),
     ):
         lines.append('{} = "{}"'.format(key, path.format(n=name)))
 
