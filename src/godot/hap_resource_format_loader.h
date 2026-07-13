@@ -12,7 +12,7 @@
 namespace godot {
 
 class HapResourceFormatLoader : public ResourceFormatLoader {
-  GDEXTENSION_CLASS(HapResourceFormatLoader, ResourceFormatLoader)
+  GDCLASS(HapResourceFormatLoader, ResourceFormatLoader)
 
 public:
   virtual Variant _load(const String &p_path, const String &p_original_path,
@@ -23,10 +23,7 @@ public:
   virtual String _get_resource_type(const String &p_path) const override;
 
 protected:
-  template <typename T, typename B>
-  static void register_virtuals() {
-    ResourceFormatLoader::register_virtuals<T, B>();
-  }
+  static void _bind_methods() {}
 };
 
 } // namespace godot

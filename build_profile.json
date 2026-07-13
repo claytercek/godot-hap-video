@@ -5,6 +5,7 @@
 		"OS",
 		"ProjectSettings",
 		"ResourceFormatLoader",
+		"ResourceLoader",
 		"VideoStream",
 		"VideoStreamPlayback",
 		"Control",
