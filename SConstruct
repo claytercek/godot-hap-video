@@ -155,29 +155,109 @@ Default(library, copy, gdextension_config)
 # -----------------------------------------------------------------------
 # Core tests (headless, no Godot dependency)
 # -----------------------------------------------------------------------
-if ARGUMENTS.get("build_tests", "0") == "1":
-    test_env = env.Clone()
-    test_env.Append(CPPPATH=["tests/core", "src/", "src/core",
-                              "thirdparty/hap", "thirdparty/snappy",
-                              "thirdparty/minimp4"])
-    test_env.Append(CXXFLAGS=["-g", "-O0"])
+test_sources = [
+    "tests/core/test_demuxer.cpp",
+    "tests/core/test_decoder.cpp",
+    "tests/core/test_concurrency.cpp",
+    "tests/core/test_scheduler.cpp",
+    "tests/core/test_playback_pump.cpp",
+    "tests/core/test_fuzz_regressions.cpp",
+]
 
-    test_sources = [
-        "tests/core/test_demuxer.cpp",
-        "tests/core/test_decoder.cpp",
-        "tests/core/test_concurrency.cpp",
-        "tests/core/test_scheduler.cpp",
-        "tests/core/test_playback_pump.cpp",
-    ]
+# Extra compiler/linker flags for the sanitizer build_tests variants and the
+# fuzz=1 harness below. Every variant recompiles the core sources and the
+# vendored static libs from scratch (rather than reusing the plain build's
+# build/src/core/*.os) so the instrumentation actually covers demuxer,
+# minimp4, hap.c, and snappy -- not just the newly-compiled test/harness file.
+SANITIZE_FLAGS = {
+    # Bundled per spec: ASan + UBSan, abort (don't just warn) on first UB.
+    "asan_ubsan": ["-fsanitize=address,undefined",
+                   "-fno-sanitize-recover=all",
+                   "-fno-omit-frame-pointer"],
+    # Separate build: scheduler/queue/ring focus.
+    "tsan": ["-fsanitize=thread"],
+}
 
+
+def _variant_env(label, extra_flags, use_clang=False):
+    v_env = env.Clone()
+    if use_clang:
+        v_env["CC"] = ARGUMENTS.get("CC", "clang")
+        v_env["CXX"] = ARGUMENTS.get("CXX", "clang++")
+    # godot-cpp strips symbols by default (debug_symbols defaults to
+    # dev_build, not to target=template_debug) via a bare "-s" LINKFLAGS.
+    # Crash/leak/race reports are useless without symbols, so drop it.
+    v_env["LINKFLAGS"] = [f for f in v_env["LINKFLAGS"] if f != "-s"]
+    v_env.Append(CCFLAGS=["-g", "-O1"] + extra_flags)
+    v_env.Append(CXXFLAGS=["-g", "-O1"] + extra_flags)
+    v_env.Append(LINKFLAGS=["-g"] + extra_flags)
+    v_env.Append(CPPPATH=["src/", "src/core", "thirdparty/hap",
+                           "thirdparty/snappy", "thirdparty/minimp4"])
     if sys.platform != "win32":
-        test_env.Append(LIBS=["pthread"])
+        v_env.Append(LIBS=["pthread"])
+    return v_env
 
-    test_targets = []
-    for src in test_sources:
-        if not os.path.exists(src):
-            continue
-        basename = os.path.splitext(os.path.basename(src))[0]
+
+def _variant_libs(v_env, label):
+    # Recompile the vendored libs from a variant-private VariantDir too --
+    # otherwise their object files collide with the plain (non-instrumented)
+    # build's objects, which live next to the source since thirdparty/ isn't
+    # under the top-level "build/src" VariantDir.
+    variant_thirdparty = "build/{}/thirdparty_src".format(label)
+    v_env.VariantDir(variant_thirdparty, "thirdparty", duplicate=0)
+
+    def _vp(path):
+        return path.replace("thirdparty/", variant_thirdparty + "/", 1)
+
+    hap = v_env.StaticLibrary(
+        "build/{}/thirdparty/hap/hap".format(label),
+        [_vp(p) for p in hap_sources],
+        CPPPATH=["thirdparty/hap", "thirdparty/snappy"],
+    )
+    snappy = v_env.StaticLibrary(
+        "build/{}/thirdparty/snappy/snappy".format(label),
+        [_vp(p) for p in snappy_sources],
+        CPPPATH=["thirdparty/snappy", "thirdparty/snappy/snappy_config"],
+    )
+    minimp4 = v_env.StaticLibrary(
+        "build/{}/thirdparty/minimp4/minimp4".format(label),
+        [_vp("thirdparty/minimp4/minimp4.c")], CPPPATH=["thirdparty/minimp4"],
+    )
+    return [hap, snappy, minimp4]
+
+
+def _variant_core_sources(v_env, label):
+    v_env.VariantDir("build/{}/core".format(label), "src/core", duplicate=0)
+    return Glob("build/{}/core/*.cpp".format(label))
+
+
+if ARGUMENTS.get("build_tests", "0") == "1":
+    sanitize = ARGUMENTS.get("sanitize", "")
+
+    if sanitize:
+        if sanitize not in SANITIZE_FLAGS:
+            print("Unknown sanitize= value '{}' (expected: {})".format(
+                sanitize, ", ".join(sorted(SANITIZE_FLAGS))))
+            Exit(1)
+        if sys.platform == "win32":
+            print("sanitize= is only supported on Linux/macOS")
+            Exit(1)
+
+        label = "sanitize_{}".format(sanitize)
+        test_env = _variant_env(label, SANITIZE_FLAGS[sanitize])
+        test_env.Append(CPPPATH=["tests/core"])
+        test_libs = _variant_libs(test_env, label)
+        core_objects = _variant_core_sources(test_env, label)
+    else:
+        test_env = env.Clone()
+        test_env.Append(CPPPATH=["tests/core", "src/", "src/core",
+                                  "thirdparty/hap", "thirdparty/snappy",
+                                  "thirdparty/minimp4"])
+        test_env.Append(CXXFLAGS=["-g", "-O0"])
+        if sys.platform != "win32":
+            test_env.Append(LIBS=["pthread"])
+
+        test_libs = [hap_lib, snappy_lib, minimp4_lib]
         core_objects = [
             "build/src/core/demuxer.os",
             "build/src/core/decoder.os",
@@ -187,12 +267,46 @@ if ARGUMENTS.get("build_tests", "0") == "1":
             "build/src/core/mmap_reader.os",
             "build/src/core/playback_pump.os",
         ]
+
+    test_targets = []
+    for src in test_sources:
+        if not os.path.exists(src):
+            continue
+        basename = os.path.splitext(os.path.basename(src))[0]
         test_bin = test_env.Program(
             "build/tests/{}".format(basename),
             [src] + core_objects,
-            LIBS=[hap_lib, snappy_lib, minimp4_lib],
+            LIBS=test_libs,
         )
         Default(test_bin)
         test_targets.append(test_bin)
 
     Alias("core_tests", test_targets)
+
+# -----------------------------------------------------------------------
+# Fuzz harness (libFuzzer + ASan, demuxer open/parse path only)
+# -----------------------------------------------------------------------
+if ARGUMENTS.get("fuzz", "0") == "1":
+    if sys.platform == "win32":
+        print("fuzz=1 is only supported on Linux/macOS with clang")
+        Exit(1)
+    if sys.platform == "linux" and ARGUMENTS.get("use_llvm", "no") != "yes":
+        # godot-cpp's linux.py only skips its GCC-only -fno-gnu-unique flag
+        # (unknown to clang) when use_llvm=yes is passed at the top level;
+        # overriding CC/CXX after the fact doesn't undo that already-appended
+        # flag, so libFuzzer (clang-only) needs the real thing.
+        print("fuzz=1 requires use_llvm=yes on Linux (libFuzzer needs clang)")
+        Exit(1)
+
+    fuzz_label = "fuzz"
+    fuzz_env = _variant_env(fuzz_label, ["-fsanitize=fuzzer,address"], use_clang=True)
+    fuzz_libs = _variant_libs(fuzz_env, fuzz_label)
+    fuzz_core_sources = _variant_core_sources(fuzz_env, fuzz_label)
+
+    fuzz_bin = fuzz_env.Program(
+        "build/fuzz/fuzz_demuxer",
+        ["tests/fuzz/fuzz_demuxer.cpp"] + fuzz_core_sources,
+        LIBS=fuzz_libs,
+    )
+    Default(fuzz_bin)
+    Alias("fuzz", fuzz_bin)
