@@ -3401,14 +3401,14 @@ static int sample_to_chunk(MP4D_track_t *tr, unsigned nsample, unsigned *nfirst_
         return -1;
     }
 
-    // Every caller in this codebase (Demuxer::open) queries nsample in
-    // strictly increasing order, once per sample -- rescanning from nc=0
-    // every time (the original behavior, and its own "TODO: this can be
-    // calculated once per file" above) makes a full demux O(chunk_count *
-    // sample_count). Fuzzing found this as a multi-second hang from a
-    // crafted file with a large-but-not-otherwise-invalid chunk count.
-    // Resume from the last call's stopping point whenever this query
-    // doesn't need to look earlier than it did.
+    // Sequential demuxing queries nsample in strictly increasing order,
+    // once per sample -- rescanning from nc=0 every time (the original
+    // behavior, and its own "TODO: this can be calculated once per file"
+    // above) makes a full demux O(chunk_count * sample_count). Fuzzing
+    // found this as a multi-second hang from a crafted file with a
+    // large-but-not-otherwise-invalid chunk count. Resume from the last
+    // call's stopping point whenever this query doesn't need to look
+    // earlier than it did.
     if (nsample >= tr->stc_cache_sum && tr->stc_cache_nc < tr->chunk_count)
     {
         chunk_group = tr->stc_cache_group;
