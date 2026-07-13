@@ -297,6 +297,88 @@ HAP_TEST(scheduler_rapid_seeks_resolve_to_latest_target_only) {
   HAP_ASSERT(saw_final_target);
 }
 
+HAP_TEST(scheduler_reverse_prefetches_frames_in_decreasing_order) {
+  std::string path = find_fixture("hap1.mov");
+  if (path.empty()) {
+    fprintf(stderr, "SKIP (no fixture) ");
+    return;
+  }
+
+  DecodeScheduler scheduler;
+  std::atomic<bool> opened{false};
+  scheduler.open_async(
+      path, [&](bool ok, const std::string &) { opened.store(ok); });
+  HAP_ASSERT(wait_for([&]() { return opened.load(); }));
+
+  uint32_t frame_count = scheduler.track_info().frame_count;
+  if (frame_count < 20) {
+    fprintf(stderr, "SKIP (fixture too short) ");
+    return;
+  }
+
+  // Reverse playback: request_frame's `forward=false` overload must decode
+  // *backward* from the target, i.e. the frame queue fills with strictly
+  // decreasing indices, not the scheduler's default forward cursor.
+  const uint32_t start = 19;
+  scheduler.request_frame(start, /*forward=*/false);
+
+  uint32_t expected = start;
+  for (int i = 0; i < 10; i++) {
+    uint32_t idx = 0;
+    HAP_ASSERT(wait_for([&]() { return scheduler.queue().peek(&idx) != nullptr; }));
+    scheduler.queue().peek(&idx);
+    HAP_ASSERT_EQ(idx, expected);
+    scheduler.queue().pop();
+    scheduler.notify_capacity_available();
+    expected--;
+  }
+}
+
+HAP_TEST(scheduler_reverse_playback_stops_cleanly_at_frame_zero) {
+  std::string path = find_fixture("hap1.mov");
+  if (path.empty()) {
+    fprintf(stderr, "SKIP (no fixture) ");
+    return;
+  }
+
+  DecodeScheduler scheduler;
+  std::atomic<bool> opened{false};
+  scheduler.open_async(
+      path, [&](bool ok, const std::string &) { opened.store(ok); });
+  HAP_ASSERT(wait_for([&]() { return opened.load(); }));
+
+  uint32_t frame_count = scheduler.track_info().frame_count;
+  if (frame_count < 5) {
+    fprintf(stderr, "SKIP (fixture too short) ");
+    return;
+  }
+
+  // Reverse playback that reaches the start of the stream must present
+  // frame 0 exactly once and then settle -- no underflow (frame_index is
+  // unsigned), no crash, no runaway re-decode of frame 0 forever.
+  scheduler.request_frame(4, /*forward=*/false);
+
+  uint32_t idx = 5; // sentinel higher than any expected index
+  bool saw_zero = false;
+  for (int i = 0; i < 5; i++) {
+    HAP_ASSERT(wait_for([&]() { return scheduler.queue().peek(&idx) != nullptr; }));
+    scheduler.queue().peek(&idx);
+    HAP_ASSERT_EQ(idx, 4u - static_cast<uint32_t>(i));
+    if (idx == 0)
+      saw_zero = true;
+    scheduler.queue().pop();
+    scheduler.notify_capacity_available();
+    if (saw_zero)
+      break;
+  }
+  HAP_ASSERT(saw_zero);
+
+  // Give the scheduler a bounded window to (mis)behave: it must not
+  // produce another frame after 0 (no wraparound, no duplicate spam).
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  HAP_ASSERT(scheduler.queue().peek(&idx) == nullptr);
+}
+
 HAP_TEST(scheduler_destroyed_immediately_after_open_does_not_hang_or_crash) {
   std::string path = find_fixture("hap1.mov");
   if (path.empty()) {

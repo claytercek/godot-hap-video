@@ -45,8 +45,9 @@ void DecodeScheduler::open_async(
   });
 }
 
-void DecodeScheduler::request_frame(uint32_t frame_index) {
+void DecodeScheduler::request_frame(uint32_t frame_index, bool forward) {
   seek_target_.store(frame_index, std::memory_order_relaxed);
+  seek_forward_.store(forward, std::memory_order_relaxed);
   seek_pending_.store(true, std::memory_order_release);
   schedule_fill_locked_if_needed();
 }
@@ -75,13 +76,20 @@ void DecodeScheduler::fill_step() {
     queue_.drain();
     cursor_.store(seek_target_.load(std::memory_order_relaxed),
                   std::memory_order_relaxed);
+    forward_.store(seek_forward_.load(std::memory_order_relaxed),
+                   std::memory_order_relaxed);
+    reverse_exhausted_.store(false, std::memory_order_relaxed);
   }
 
+  bool forward = forward_.load(std::memory_order_relaxed);
   const auto &samples = demuxer_.samples();
   uint32_t frame_index = cursor_.load(std::memory_order_relaxed);
 
   bool decoded_one = false;
-  if (frame_index < samples.size() && !queue_.full()) {
+  bool can_decode = frame_index < samples.size() && !queue_.full() &&
+                     !(!forward &&
+                       reverse_exhausted_.load(std::memory_order_relaxed));
+  if (can_decode) {
     const uint8_t *sample = demuxer_.sample_data(mmap_, frame_index);
     if (sample) {
       DecodedFrame *slot = queue_.begin_write(frame_index);
@@ -89,14 +97,26 @@ void DecodeScheduler::fill_step() {
         if (decoder_.decode(sample, samples[frame_index].size, *slot)) {
           queue_.commit_write();
           decoded_one = true;
-          cursor_.store(frame_index + 1, std::memory_order_relaxed);
+          if (forward) {
+            cursor_.store(frame_index + 1, std::memory_order_relaxed);
+          } else if (frame_index > 0) {
+            cursor_.store(frame_index - 1, std::memory_order_relaxed);
+          } else {
+            // Reached the start of the stream going backward: cursor_ is
+            // unsigned, so it must not decrement past 0. Latch a flag
+            // instead of storing a sentinel, so a later forward request
+            // still resumes correctly from frame 0.
+            reverse_exhausted_.store(true, std::memory_order_relaxed);
+          }
         }
       }
     }
   }
 
-  bool more_to_do = decoded_one && !queue_.full() &&
-                    cursor_.load(std::memory_order_relaxed) < samples.size();
+  bool has_more_in_direction =
+      forward ? cursor_.load(std::memory_order_relaxed) < samples.size()
+              : !reverse_exhausted_.load(std::memory_order_relaxed);
+  bool more_to_do = decoded_one && !queue_.full() && has_more_in_direction;
   more_to_do = more_to_do || seek_pending_.load(std::memory_order_acquire);
 
   if (more_to_do) {

@@ -70,11 +70,16 @@ public:
   /// The consumer-side (render thread) frame queue.
   FrameQueue &queue() { return queue_; }
 
-  /// Request that decode proceed from `frame_index`. On first call after
-  /// open, this starts forward prefetch. On subsequent calls with a
-  /// different index, this is a seek: the queue is drained and refilled
-  /// from the new position once the in-flight decode (if any) completes.
-  void request_frame(uint32_t frame_index);
+  /// Request that decode proceed from `frame_index`, in either temporal
+  /// direction. On first call after open, this starts prefetch from
+  /// `frame_index`. On subsequent calls (a different index and/or a
+  /// direction flip), this is a seek: the queue is drained and refilled
+  /// from the new position/direction once the in-flight decode (if any)
+  /// completes. `forward=false` decodes backward (frame_index,
+  /// frame_index-1, ...), stopping cleanly at frame 0 -- Hap is
+  /// all-keyframe, so reverse is this queue-management behavior, not a
+  /// different decode path.
+  void request_frame(uint32_t frame_index, bool forward = true);
 
   /// Call after popping a frame from queue() to allow prefetch to
   /// continue filling the now-open slot. A no-op if a fill is already
@@ -104,6 +109,15 @@ private:
   // Pending seek target, applied by the next fill_step invocation.
   std::atomic<bool> seek_pending_{false};
   std::atomic<uint32_t> seek_target_{0};
+  std::atomic<bool> seek_forward_{true};
+
+  // Active decode direction, latched from seek_forward_ when a pending
+  // seek is applied in fill_step().
+  std::atomic<bool> forward_{true};
+
+  // True once a reverse fill has decoded frame 0 -- stops fill_step from
+  // underflowing cursor_ (unsigned) by re-decoding frame 0 forever.
+  std::atomic<bool> reverse_exhausted_{false};
 
   // True while a fill_step is queued or running for this stream, so
   // notify_capacity_available()/request_frame() don't over-submit.
