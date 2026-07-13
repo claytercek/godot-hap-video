@@ -603,8 +603,14 @@ unsigned int HapEncode(unsigned int count,
     }
 }
 
-static void hap_decode_chunk(HapChunkDecodeInfo chunks[], unsigned int index)
+// Matches HapDecodeWorkFunction's signature exactly (void *, unsigned int)
+// so callback() can invoke it without a function-pointer cast -- casting
+// between function pointer types with different parameter types is
+// undefined behavior (UBSan's -fsanitize=function flags it), even though
+// it happens to work on every ABI this library targets.
+static void hap_decode_chunk(void *p, unsigned int index)
 {
+    HapChunkDecodeInfo *chunks = (HapChunkDecodeInfo *)p;
     if (chunks)
     {
         if (chunks[index].compressor == kHapCompressorSnappy)
@@ -858,7 +864,7 @@ unsigned int hap_decode_single_texture(const void *texture_section, uint32_t tex
                 }
                 else
                 {
-                    callback((HapDecodeWorkFunction)hap_decode_chunk, chunk_info, chunk_count, info);
+                    callback(hap_decode_chunk, chunk_info, chunk_count, info);
                 }
 
                 /*
