@@ -112,3 +112,7 @@ jobs:
       - name: Run scheduler tests
         run: build/tests/test_scheduler
         shell: bash
+
+      - name: Run fuzz regression tests
+        run: build/tests/test_fuzz_regressions
+        shell: bash
