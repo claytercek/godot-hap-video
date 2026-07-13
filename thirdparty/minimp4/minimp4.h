@@ -2912,7 +2912,7 @@ broken_android_meta_hack:
 #if MP4D_TRACE_TIMESTAMPS || MP4D_TIMESTAMPS_SUPPORTED
         case BOX_stts:
             {
-                unsigned count, j, k = 0, ts = 0, ts_count;
+                unsigned count, j, k = 0, ts = 0, ts_capacity;
                 // Hardening fix: g_fullbox[] registers BOX_stts with
                 // use_track_flag=0 (no active-track requirement enforced
                 // before this case runs), but the MP4D_TIMESTAMPS_SUPPORTED
@@ -2923,11 +2923,11 @@ broken_android_meta_hack:
                 if (!tr)
                     break;
                 count = READ(4);
-                ts_count = count;
+                ts_capacity = count;
 #if MP4D_TIMESTAMPS_SUPPORTED
-                MALLOC(unsigned int*, tr->timestamp, ts_count*4);
-                MALLOC(unsigned int*, tr->duration, ts_count*4);
-                tr->timestamp_count = ts_count;
+                MALLOC(unsigned int*, tr->timestamp, ts_capacity*4);
+                MALLOC(unsigned int*, tr->duration, ts_capacity*4);
+                tr->timestamp_count = 0;
 #endif
 
                 for (i = 0; i < count; i++)
@@ -2937,36 +2937,51 @@ broken_android_meta_hack:
                     uint64_t new_k = (uint64_t)k + sc; // avoid 32-bit wraparound below
                     TRACE(("sample %8d count %8d duration %8d\n", i, sc, d));
 #if MP4D_TIMESTAMPS_SUPPORTED
-                    if (new_k > ts_count)
+                    if (new_k > ts_capacity)
                     {
                         // sc is an attacker-controlled per-entry sample
                         // count; k + sc as plain "unsigned" arithmetic can
-                        // wrap past ts_count, skipping this resize while
+                        // wrap past ts_capacity, skipping this resize while
                         // the write loop below still walks `sc` entries --
                         // a fuzzer-found heap-buffer-overflow. Widening the
-                        // addition avoids the wrap; the size check (fuzzer
-                        // also found a ~16GB realloc() request from crafted
-                        // input) still runs on the correct, non-wrapped
-                        // total. Checking the bound *before* reallocating
-                        // matters too: rejecting after the fact would mean
+                        // addition avoids the wrap.
+                        //
+                        // Growing to exactly new_k on every entry (rather
+                        // than with slack) meant a file with many entries
+                        // that each grow the running total by only a
+                        // little forced a full realloc -- and full copy --
+                        // on every single one: a fuzzer-found multi-second
+                        // "realloc thrashing" hang distinct from a single
+                        // oversized allocation. Double capacity instead
+                        // (still bounded to MINIMP4_MAX_ALLOC_BYTES, which
+                        // is what catches the ~16GB single-request case
+                        // fuzzing also found), same amortized-growth
+                        // rationale as std::vector.
+                        //
+                        // Checking the bound *before* reallocating matters
+                        // too: rejecting after the fact would mean
                         // overwriting one perfectly good pointer (from the
                         // MALLOC above) with the other realloc's NULL
                         // result, leaking the one that had succeeded.
                         // Leaving both pointers untouched on rejection lets
                         // MP4D_close() free them normally, same as any
                         // other error path.
-                        if (new_k * sizeof(unsigned) > MINIMP4_MAX_ALLOC_BYTES)
+                        uint64_t new_capacity = (uint64_t)ts_capacity * 2;
+                        if (new_capacity < new_k)
+                            new_capacity = new_k;
+                        if (new_capacity * sizeof(unsigned) > MINIMP4_MAX_ALLOC_BYTES)
+                            new_capacity = MINIMP4_MAX_ALLOC_BYTES / sizeof(unsigned);
+                        if (new_capacity < new_k)
                         {
                             ERROR("out of memory");
                         }
-                        ts_count = (unsigned)new_k;
-                        tr->timestamp = (unsigned int*)realloc(tr->timestamp, ts_count * sizeof(unsigned));
-                        tr->duration  = (unsigned int*)realloc(tr->duration,  ts_count * sizeof(unsigned));
+                        ts_capacity = (unsigned)new_capacity;
+                        tr->timestamp = (unsigned int*)realloc(tr->timestamp, ts_capacity * sizeof(unsigned));
+                        tr->duration  = (unsigned int*)realloc(tr->duration,  ts_capacity * sizeof(unsigned));
                         if (!tr->timestamp || !tr->duration)
                         {
                             ERROR("out of memory");
                         }
-                        tr->timestamp_count = ts_count;
                     }
                     for (j = 0; j < sc; j++)
                     {
@@ -2974,6 +2989,7 @@ broken_android_meta_hack:
                         tr->timestamp[k++] = ts;
                         ts += d;
                     }
+                    tr->timestamp_count = k;
 #endif
                 }
             }
