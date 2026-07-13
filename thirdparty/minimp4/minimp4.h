@@ -3007,8 +3007,19 @@ broken_android_meta_hack:
                 unsigned count = READ(4);
                 for (i = 0; i < count; i++)
                 {
-                    int sc = READ(4);
-                    int d =  READ(4);
+                    int sc, d;
+                    // count is an unbounded, file-declared value with no
+                    // backing allocation to size-check against (unlike
+                    // stsz/stsc/stco/stts above); once the box's actual
+                    // payload is exhausted, READ() keeps returning
+                    // zero-padding forever rather than stopping the loop,
+                    // so a file can claim ~4 billion entries in a few
+                    // bytes on disk. Fuzzer found this as a multi-second
+                    // hang (pure wasted CPU, not memory-unsafe on its own).
+                    if (payload_bytes == 0)
+                        break;
+                    sc = READ(4);
+                    d =  READ(4);
                     (void)sc;
                     (void)d;
                     TRACE(("sample %8d count %8d decoding to composition offset %8d\n", i, sc, d));
