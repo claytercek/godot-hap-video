@@ -398,6 +398,17 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
     return result;
   }
 
+  // A file can't legitimately contain more samples than it has bytes, so
+  // this also catches minimp4's stsz sample_count (bounded only to a
+  // generous 256MB/4-byte-entries ceiling) before it drives a reserve()
+  // far bigger than the file it came from -- fuzzer found a ~1GB
+  // allocation from a small crafted file.
+  if (static_cast<uint64_t>(num_samples) > file_size_) {
+    result.error_message = "Sample count exceeds file size (broken file?)";
+    cleanup_mp4();
+    return result;
+  }
+
   // Cache all sample offsets/sizes
   samples_.reserve(num_samples);
   for (uint32_t i = 0; i < num_samples; i++) {
