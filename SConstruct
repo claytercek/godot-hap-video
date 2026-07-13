@@ -108,32 +108,31 @@ copy = env.Install(install_dir, library)
 # -----------------------------------------------------------------------
 # Generate .gdextension manifest
 # -----------------------------------------------------------------------
+# The manifest always lists every shipped platform (not just the one being
+# built) so the addon directory is drop-in complete once the per-platform
+# binaries are assembled. Filenames must match the flat suffix above:
+# ".universal" is stripped on macOS, but linux/windows keep their arch.
 def _gen_gdextension(target, source, env):
-    plat = env["platform"]
     name = "hap_video"
-
-    if plat in ("macos", "ios"):
-        prefix = "lib"
-        ext = "dylib"
-    elif plat == "windows":
-        prefix = ""
-        ext = "dll"
-    else:
-        prefix = "lib"
-        ext = "so"
-
-    content = (
-        "[configuration]\n"
-        "entry_symbol = \"hap_video_init\"\n"
-        "compatibility_minimum = 4.4\n"
-        "\n"
-        "[libraries]\n"
-        "{plat}.debug = \"./{plat}/{prefix}{name}.{plat}.template_debug.{ext}\"\n"
-        "{plat}.release = \"./{plat}/{prefix}{name}.{plat}.template_release.{ext}\"\n"
-    ).format(plat=plat, prefix=prefix, name=name, ext=ext)
+    lines = [
+        "[configuration]",
+        'entry_symbol = "hap_video_init"',
+        "compatibility_minimum = 4.4",
+        "",
+        "[libraries]",
+    ]
+    for key, path in (
+        ("macos.debug", "./macos/lib{n}.macos.template_debug.dylib"),
+        ("macos.release", "./macos/lib{n}.macos.template_release.dylib"),
+        ("windows.debug.x86_64", "./windows/lib{n}.windows.template_debug.x86_64.dll"),
+        ("windows.release.x86_64", "./windows/lib{n}.windows.template_release.x86_64.dll"),
+        ("linux.debug.x86_64", "./linux/lib{n}.linux.template_debug.x86_64.so"),
+        ("linux.release.x86_64", "./linux/lib{n}.linux.template_release.x86_64.so"),
+    ):
+        lines.append('{} = "{}"'.format(key, path.format(n=name)))
 
     with open(target[0].path, "w") as f:
-        f.write(content)
+        f.write("\n".join(lines) + "\n")
 
 gdextension_config = env.Command(
     target="addons/hap_video/hap_video.gdextension",
@@ -143,7 +142,20 @@ gdextension_config = env.Command(
 
 env.Depends(gdextension_config, library)
 
-Default(library, copy, gdextension_config)
+# -----------------------------------------------------------------------
+# Bundle licenses into the addon (extension + statically linked deps)
+# -----------------------------------------------------------------------
+license_files = [
+    env.InstallAs("{}/LICENSE.md".format(projectdir), "LICENSE.md"),
+    env.InstallAs(
+        "{}/licenses/LICENSE-godot-cpp.txt".format(projectdir),
+        "godot-cpp/LICENSE.md",
+    ),
+]
+for lic in Glob("thirdparty/licenses/*"):
+    license_files.append(env.Install("{}/licenses/".format(projectdir), lic))
+
+Default(library, copy, gdextension_config, license_files)
 
 # -----------------------------------------------------------------------
 # Core tests (headless, no Godot dependency)
