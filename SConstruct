@@ -34,6 +34,14 @@ env = SConscript("godot-cpp/SConstruct", {"env": env, "customs": customs})
 suffix = env["suffix"].replace(".dev", "").replace(".universal", "")
 
 # -----------------------------------------------------------------------
+# Vendored dependency include paths (shared by every build variant below)
+# -----------------------------------------------------------------------
+THIRDPARTY_CPPPATH = ["thirdparty/hap", "thirdparty/snappy", "thirdparty/minimp4"]
+HAP_CPPPATH = ["thirdparty/hap", "thirdparty/snappy"]
+SNAPPY_CPPPATH = ["thirdparty/snappy", "thirdparty/snappy/snappy_config"]
+MINIMP4_CPPPATH = ["thirdparty/minimp4"]
+
+# -----------------------------------------------------------------------
 # Vendored dependency targets
 # -----------------------------------------------------------------------
 if sys.platform == "win32":
@@ -48,7 +56,7 @@ hap_sources = ["thirdparty/hap/hap.c"]
 hap_lib = env.StaticLibrary(
     "build/thirdparty/hap/hap",
     hap_sources,
-    CPPPATH=["thirdparty/hap", "thirdparty/snappy"],
+    CPPPATH=HAP_CPPPATH,
 )
 
 # snappy (C++ sources)
@@ -61,14 +69,14 @@ snappy_sources = [
 snappy_lib = env.StaticLibrary(
     "build/thirdparty/snappy/snappy",
     snappy_sources,
-    CPPPATH=["thirdparty/snappy", "thirdparty/snappy/snappy_config"],
+    CPPPATH=SNAPPY_CPPPATH,
 )
 
 # minimp4 (single-header C library; built with 64-bit offset support)
 minimp4_lib = env.StaticLibrary(
     "build/thirdparty/minimp4/minimp4",
     ["thirdparty/minimp4/minimp4.c"],
-    CPPPATH=["thirdparty/minimp4"],
+    CPPPATH=MINIMP4_CPPPATH,
 )
 
 # -----------------------------------------------------------------------
@@ -76,24 +84,9 @@ minimp4_lib = env.StaticLibrary(
 # -----------------------------------------------------------------------
 env.VariantDir("build/src", "src", duplicate=0)
 
-env.Append(CPPPATH=[
-    "src/", "src/core", "src/godot",
-    "thirdparty/hap", "thirdparty/snappy", "thirdparty/minimp4",
-])
+env.Append(CPPPATH=["src/", "src/core", "src/godot"] + THIRDPARTY_CPPPATH)
 
-sources = [
-    "build/src/godot/register_types.cpp",
-    "build/src/godot/hap_video_stream.cpp",
-    "build/src/godot/hap_video_stream_playback.cpp",
-    "build/src/godot/hap_resource_format_loader.cpp",
-    "build/src/godot/hap_texture_2d.cpp",
-    "build/src/godot/gpu_presenter.cpp",
-    "build/src/godot/hap_player.cpp",
-]
-
-# Core sources (currently empty, but directory structure is ready)
-core_sources = Glob("build/src/core/*.cpp")
-sources.extend(core_sources)
+sources = Glob("build/src/godot/*.cpp") + Glob("build/src/core/*.cpp")
 
 # -----------------------------------------------------------------------
 # Shared library
@@ -191,8 +184,7 @@ def _variant_env(label, extra_flags, use_clang=False):
     v_env.Append(CCFLAGS=["-g", "-O1"] + extra_flags)
     v_env.Append(CXXFLAGS=["-g", "-O1"] + extra_flags)
     v_env.Append(LINKFLAGS=["-g"] + extra_flags)
-    v_env.Append(CPPPATH=["src/", "src/core", "thirdparty/hap",
-                           "thirdparty/snappy", "thirdparty/minimp4"])
+    v_env.Append(CPPPATH=["src/", "src/core"] + THIRDPARTY_CPPPATH)
     if sys.platform != "win32":
         v_env.Append(LIBS=["pthread"])
     return v_env
@@ -212,16 +204,16 @@ def _variant_libs(v_env, label):
     hap = v_env.StaticLibrary(
         "build/{}/thirdparty/hap/hap".format(label),
         [_vp(p) for p in hap_sources],
-        CPPPATH=["thirdparty/hap", "thirdparty/snappy"],
+        CPPPATH=HAP_CPPPATH,
     )
     snappy = v_env.StaticLibrary(
         "build/{}/thirdparty/snappy/snappy".format(label),
         [_vp(p) for p in snappy_sources],
-        CPPPATH=["thirdparty/snappy", "thirdparty/snappy/snappy_config"],
+        CPPPATH=SNAPPY_CPPPATH,
     )
     minimp4 = v_env.StaticLibrary(
         "build/{}/thirdparty/minimp4/minimp4".format(label),
-        [_vp("thirdparty/minimp4/minimp4.c")], CPPPATH=["thirdparty/minimp4"],
+        [_vp("thirdparty/minimp4/minimp4.c")], CPPPATH=MINIMP4_CPPPATH,
     )
     return [hap, snappy, minimp4]
 
@@ -250,28 +242,24 @@ if ARGUMENTS.get("build_tests", "0") == "1":
         core_objects = _variant_core_sources(test_env, label)
     else:
         test_env = env.Clone()
-        test_env.Append(CPPPATH=["tests/core", "src/", "src/core",
-                                  "thirdparty/hap", "thirdparty/snappy",
-                                  "thirdparty/minimp4"])
+        test_env.Append(CPPPATH=["tests/core", "src/", "src/core"] + THIRDPARTY_CPPPATH)
         test_env.Append(CXXFLAGS=["-g", "-O0"])
         if sys.platform != "win32":
             test_env.Append(LIBS=["pthread"])
 
         test_libs = [hap_lib, snappy_lib, minimp4_lib]
-        core_objects = [
-            "build/src/core/demuxer.os",
-            "build/src/core/decoder.os",
-            "build/src/core/thread_pool.os",
-            "build/src/core/outer_thread_pool.os",
-            "build/src/core/decode_scheduler.os",
-            "build/src/core/mmap_reader.os",
-            "build/src/core/playback_pump.os",
-        ]
+        # Reuse the already-built (non-instrumented) core objects from the
+        # main SharedLibrary build above instead of recompiling -- same
+        # Glob source as line ~95, but matching the compiled objects rather
+        # than the .cpp sources, since $SHOBJSUFFIX is what SharedLibrary
+        # actually produced them as (".os" on POSIX, ".obj" on MSVC).
+        core_objects = Glob("build/src/core/*" + env["SHOBJSUFFIX"])
 
     test_targets = []
     for src in test_sources:
         if not os.path.exists(src):
-            continue
+            print("Missing test source: {}".format(src))
+            Exit(1)
         basename = os.path.splitext(os.path.basename(src))[0]
         test_bin = test_env.Program(
             "build/tests/{}".format(basename),
