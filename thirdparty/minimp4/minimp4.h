@@ -3379,6 +3379,16 @@ static int sample_to_chunk(MP4D_track_t *tr, unsigned nsample, unsigned *nfirst_
     {
         return 0;
     }
+    if (!tr->sample_to_chunk || tr->sample_to_chunk_count == 0)
+    {
+        // Hardening fix: a track can have a stco/co64 (chunk_count > 1)
+        // with no stsc box at all (tr->sample_to_chunk NULL), or a stsc
+        // box declaring zero entries. The loop below dereferences
+        // tr->sample_to_chunk[chunk_group] unconditionally on its very
+        // first iteration regardless of tr->sample_to_chunk_count --
+        // fuzzer found the NULL case as a null-pointer deref.
+        return -1;
+    }
 
     // Every caller in this codebase (Demuxer::open) queries nsample in
     // strictly increasing order, once per sample -- rescanning from nc=0
@@ -3437,8 +3447,18 @@ MP4D_file_offset_t MP4D_frame_offset(const MP4D_demux_t *mp4, unsigned ntrack, u
     int nchunk = sample_to_chunk(tr, nsample, &ns);
     MP4D_file_offset_t offset;
 
-    if (nchunk < 0)
+    if (nchunk < 0 || !tr->chunk_offset || !tr->entry_size)
     {
+        // Hardening fix: chunk_count/sample_count and their matching
+        // chunk_offset/entry_size arrays are set together within a single
+        // box handler, but a malformed file can hit that handler's
+        // out-of-memory ERROR() path (e.g. a duplicate stco/stsz declaring
+        // an oversized count the second time around) after already
+        // free()-ing the previous, valid allocation -- and, at depth 0,
+        // ERROR() doesn't actually abort the parse (see the box handlers'
+        // own comments on this), so a later chunk_count/sample_count can
+        // end up numerically valid while its array stayed NULL. Fuzzer
+        // found this as a null-pointer deref.
         *frame_bytes = 0;
         return 0;
     }
