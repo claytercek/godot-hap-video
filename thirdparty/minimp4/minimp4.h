@@ -2525,7 +2525,32 @@ static void my_fseek(MP4D_demux_t *mp4, boxsize_t pos, int *eof_flag)
 
 #define READ(n) read_payload(mp4, n, &payload_bytes, &eof_flag)
 #define SKIP(n) { boxsize_t t = MINIMP4_MIN(payload_bytes, n); my_fseek(mp4, t, &eof_flag); payload_bytes -= t; }
-#define MALLOC(t, p, size) p = (t)malloc(size); if (!(p)) { ERROR("out of memory"); }
+
+/**
+*   Several box handlers (stsc, stts, stco/co64, DSI/tag buffers, ...) use a
+*   count or size field read directly from the file as a malloc()/realloc()
+*   size, with no bound against how much data the file could actually back.
+*   Fuzzing the demuxer's open/parse path found multiple ~3GB and ~16GB
+*   allocation requests derived from a few hundred bytes of crafted input.
+*   Route every parse-time (re)allocation through one sanity ceiling instead
+*   of auditing (and re-auditing) each call site individually: no legitimate
+*   Hap MOV needs anywhere near this much memory for a single metadata
+*   table.
+*/
+enum { MINIMP4_MAX_ALLOC_BYTES = 256u * 1024u * 1024u };
+
+static void *minimp4_bounded_malloc(size_t size)
+{
+    if (size > MINIMP4_MAX_ALLOC_BYTES)
+        return NULL;
+    return malloc(size);
+}
+
+// A malformed file can carry the same table box (stsc, stco/co64, ...)
+// twice for one track; re-running a MALLOC for a field that's already
+// populated would leak the earlier block. free() is a no-op on NULL, so
+// this is free for the (common) single-occurrence case.
+#define MALLOC(t, p, size) { free(p); p = (t)minimp4_bounded_malloc(size); if (!(p)) { ERROR("out of memory"); } }
 
 /*
 *   On error: release resources.
@@ -2805,7 +2830,17 @@ broken_android_meta_hack:
         case BOX_stsz:
             {
                 int size = 0;
-                uint32_t sample_size = READ(4);
+                uint32_t sample_size;
+                // Hardening fix: g_fullbox[]'s use_track_flag check only
+                // hard-aborts via RETURN_ERROR at depth > 0 -- at depth 0
+                // (this box appearing with no enclosing moov/trak) ERROR()
+                // just breaks out of that unrelated lookup loop and parsing
+                // continues into this case with tr still NULL. Fuzzer
+                // found this as a null-pointer deref from a lone top-level
+                // "stsz" box.
+                if (!tr)
+                    break;
+                sample_size = READ(4);
                 tr->sample_count = READ(4);
                 MALLOC(unsigned int*, tr->entry_size, tr->sample_count*4);
                 for (i = 0; i < tr->sample_count; i++)
@@ -2840,6 +2875,9 @@ broken_android_meta_hack:
             break;
 
         case BOX_stsc:  //ISO/IEC 14496-12 Page 38. Section 8.18 - Sample To Chunk Box.
+            // Same depth-0 use_track_flag gap as BOX_stsz above.
+            if (!tr)
+                break;
             tr->sample_to_chunk_count = READ(4);
             MALLOC(MP4D_sample_to_chunk_t*, tr->sample_to_chunk, tr->sample_to_chunk_count*sizeof(tr->sample_to_chunk[0]));
             for (i = 0; i < tr->sample_to_chunk_count; i++)
@@ -2852,8 +2890,18 @@ broken_android_meta_hack:
 #if MP4D_TRACE_TIMESTAMPS || MP4D_TIMESTAMPS_SUPPORTED
         case BOX_stts:
             {
-                unsigned count = READ(4);
-                unsigned j, k = 0, ts = 0, ts_count = count;
+                unsigned count, j, k = 0, ts = 0, ts_count;
+                // Hardening fix: g_fullbox[] registers BOX_stts with
+                // use_track_flag=0 (no active-track requirement enforced
+                // before this case runs), but the MP4D_TIMESTAMPS_SUPPORTED
+                // branch below unconditionally writes through tr -- a
+                // top-level "stts" box with no enclosing trak (tr still
+                // NULL) reaches this with no track allocated yet. Fuzzer
+                // found this as a null-pointer deref from an 8-byte file.
+                if (!tr)
+                    break;
+                count = READ(4);
+                ts_count = count;
 #if MP4D_TIMESTAMPS_SUPPORTED
                 MALLOC(unsigned int*, tr->timestamp, ts_count*4);
                 MALLOC(unsigned int*, tr->duration, ts_count*4);
@@ -2863,13 +2911,38 @@ broken_android_meta_hack:
                 {
                     unsigned sc = READ(4);
                     int d =  READ(4);
+                    uint64_t new_k = (uint64_t)k + sc; // avoid 32-bit wraparound below
                     TRACE(("sample %8d count %8d duration %8d\n", i, sc, d));
 #if MP4D_TIMESTAMPS_SUPPORTED
-                    if (k + sc > ts_count)
+                    if (new_k > ts_count)
                     {
-                        ts_count = k + sc;
+                        // sc is an attacker-controlled per-entry sample
+                        // count; k + sc as plain "unsigned" arithmetic can
+                        // wrap past ts_count, skipping this resize while
+                        // the write loop below still walks `sc` entries --
+                        // a fuzzer-found heap-buffer-overflow. Widening the
+                        // addition avoids the wrap; the size check (fuzzer
+                        // also found a ~16GB realloc() request from crafted
+                        // input) still runs on the correct, non-wrapped
+                        // total. Checking the bound *before* reallocating
+                        // matters too: rejecting after the fact would mean
+                        // overwriting one perfectly good pointer (from the
+                        // MALLOC above) with the other realloc's NULL
+                        // result, leaking the one that had succeeded.
+                        // Leaving both pointers untouched on rejection lets
+                        // MP4D_close() free them normally, same as any
+                        // other error path.
+                        if (new_k * sizeof(unsigned) > MINIMP4_MAX_ALLOC_BYTES)
+                        {
+                            ERROR("out of memory");
+                        }
+                        ts_count = (unsigned)new_k;
                         tr->timestamp = (unsigned int*)realloc(tr->timestamp, ts_count * sizeof(unsigned));
                         tr->duration  = (unsigned int*)realloc(tr->duration,  ts_count * sizeof(unsigned));
+                        if (!tr->timestamp || !tr->duration)
+                        {
+                            ERROR("out of memory");
+                        }
                     }
                     for (j = 0; j < sc; j++)
                     {
@@ -2897,6 +2970,9 @@ broken_android_meta_hack:
 #endif
         case BOX_stco:  //ISO/IEC 14496-12 Page 39. Section 8.19 - Chunk Offset Box.
         case BOX_co64:
+            // Same depth-0 use_track_flag gap as BOX_stsz above.
+            if (!tr)
+                break;
             tr->chunk_count = READ(4);
             MALLOC(MP4D_file_offset_t*, tr->chunk_offset, tr->chunk_count*sizeof(MP4D_file_offset_t));
             for (i = 0; i < tr->chunk_count; i++)
@@ -3028,8 +3104,17 @@ broken_android_meta_hack:
         case BOX_avcC:  // AVCDecoderConfigurationRecord()
             // hack: AAC-specific DSI field reused (for it have same purpoose as sps/pps)
             // TODO: check this hack if BOX_esds co-exist with BOX_avcC
+            // Hardening fix: unlike its sibling cases (mp4s/mp4a/avc1/mp4v),
+            // this one had no tr-null guard at all -- a lone top-level
+            // "avcC" box reaches this with tr still NULL.
+            if (!tr)
+                break;
             tr->object_type_indication = MP4_OBJECT_TYPE_AVC;
-            tr->dsi = (unsigned char*)malloc((size_t)box_bytes);
+            tr->dsi = (unsigned char*)minimp4_bounded_malloc((size_t)box_bytes);
+            if (!tr->dsi)
+            {
+                ERROR("out of memory");
+            }
             tr->dsi_bytes = (unsigned)box_bytes;
             {
                 int spspps;
@@ -3091,7 +3176,13 @@ broken_android_meta_hack:
             }
 
         case OD_DCD:        //ISO/IEC 14496-1 Page 28. Section 8.6.5 - DecoderConfigDescriptor.
-            assert(tr);     // ensured by g_fullbox[] check
+            // g_fullbox[] doesn't actually gate OD_DCD/OD_DSI (that table
+            // covers ISOBMFF full boxes, not MPEG-4 object descriptors), so
+            // a DecoderConfigDescriptor/DecSpecificInfo can be reached with
+            // no active track (asserts are compiled out under NDEBUG) --
+            // hardening fix for a fuzzer-found null-pointer deref.
+            if (!tr)
+                break;
             tr->object_type_indication = READ(1);
 #if MP4D_INFO_SUPPORTED
             tr->stream_type = READ(1) >> 2;
@@ -3103,7 +3194,8 @@ broken_android_meta_hack:
             break;
 
         case OD_DSI:        //ISO/IEC 14496-1 Page 28. Section 8.6.5 - DecoderConfigDescriptor.
-            assert(tr);     // ensured by g_fullbox[] check
+            if (!tr)
+                break;
             if (!tr->dsi && payload_bytes)
             {
                 MALLOC(unsigned char*, tr->dsi, (int)payload_bytes);
@@ -3215,7 +3307,16 @@ static int sample_to_chunk(MP4D_track_t *tr, unsigned nsample, unsigned *nfirst_
     unsigned chunk_group = 0, nc;
     unsigned sum = 0;
     *nfirst_sample_in_chunk = 0;
-    if (tr->chunk_count <= 1)
+    if (tr->chunk_count == 0)
+    {
+        // Hardening fix: a track can declare samples (stsz) with no chunk
+        // offset table (missing/empty stco/co64) in a malformed file. The
+        // original "<= 1" fast path treated this the same as the legitimate
+        // single-chunk case and returned chunk 0, which made callers index
+        // into a chunk_offset array that was never allocated.
+        return -1;
+    }
+    if (tr->chunk_count == 1)
     {
         return 0;
     }
@@ -3263,7 +3364,11 @@ MP4D_file_offset_t MP4D_frame_offset(const MP4D_demux_t *mp4, unsigned ntrack, u
     if (timestamp)
     {
 #if MP4D_TIMESTAMPS_SUPPORTED
-        *timestamp = tr->timestamp[ns];
+        // Hardening fix: a track can have samples (from stsz) but no stts
+        // box at all, leaving tr->timestamp/tr->duration NULL from the
+        // MP4D_track_t's zero-init -- fuzzer found this as a null-pointer
+        // deref from a malformed file with no timing box.
+        *timestamp = tr->timestamp ? tr->timestamp[ns] : 0;
 #else
         *timestamp = 0;
 #endif
@@ -3271,7 +3376,7 @@ MP4D_file_offset_t MP4D_frame_offset(const MP4D_demux_t *mp4, unsigned ntrack, u
     if (duration)
     {
 #if MP4D_TIMESTAMPS_SUPPORTED
-        *duration = tr->duration[ns];
+        *duration = tr->duration ? tr->duration[ns] : 0;
 #else
         *duration = 0;
 #endif
