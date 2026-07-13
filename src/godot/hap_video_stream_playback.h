@@ -36,6 +36,47 @@ public:
 
   bool open(const String &p_path);
 
+  // -----------------------------------------------------------------
+  // Power-user layer (HapPlayer) integration surface. HapPlayer owns
+  // this object directly rather than through a VideoStreamPlayer, so
+  // the engine never calls the virtuals below automatically; HapPlayer
+  // drives them from its own _process() pump instead. No loop, rate,
+  // or reverse policy lives here -- HapPlayer decides *when* to call
+  // these; this object only decodes/presents the frame it's told to.
+  // -----------------------------------------------------------------
+
+  /// Poll for async-open + GPU-init completion, running
+  /// initialize_after_open() the first time it's ready. Safe to call
+  /// every tick before open completes; a no-op afterward. Returns
+  /// is_ready().
+  bool poll_ready();
+
+  /// True once metadata and the presented texture are valid (post
+  /// async-open + GPU init).
+  bool is_ready() const { return playback_initialized_; }
+
+  /// True once the async open or GPU init has failed permanently.
+  bool has_failed() const;
+
+  /// Human-readable error, valid once has_failed() is true.
+  String get_error() const;
+
+  // Metadata, valid once is_ready() is true.
+  double get_frame_rate() const { return track_.frame_rate; }
+  int32_t get_width() const { return static_cast<int32_t>(track_.width); }
+  int32_t get_height() const { return static_cast<int32_t>(track_.height); }
+  int32_t get_frame_count() const {
+    return static_cast<int32_t>(track_.frame_count);
+  }
+
+  /// Decode and present the frame at `frame_index`, in `forward`
+  /// direction. `retarget` must be true on any discontinuity (play
+  /// start, scrub, step, loop wrap, direction change) so the
+  /// scheduler's prefetch is redirected; false for ordinary
+  /// continuous-direction playback, which relies on prefetch already
+  /// in flight. A no-op until is_ready().
+  void advance_to_frame(uint32_t frame_index, bool forward, bool retarget);
+
   virtual void _stop() override;
   virtual void _play() override;
   virtual bool _is_playing() const override;
@@ -94,9 +135,10 @@ private:
   void initialize_after_open();
 
   /// Drain the frame queue up to (and including) `target_frame`,
-  /// presenting the first frame found at or after it. Frames behind
+  /// presenting the first frame found at or after it (or, when
+  /// `forward` is false, at or before it). Frames on the wrong side of
   /// the target are stale prefetch and are discarded.
-  void present_up_to_frame(uint32_t target_frame);
+  void present_up_to_frame(uint32_t target_frame, bool forward = true);
 
   /// Convert a playback-position time to a frame index, clamped to the
   /// track's valid frame range. Only meaningful once track_ is populated

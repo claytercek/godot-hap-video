@@ -72,6 +72,45 @@ void HapVideoStreamPlayback::initialize_after_open() {
   scheduler_.request_frame(current_frame_);
 }
 
+bool HapVideoStreamPlayback::poll_ready() {
+  if (open_failed_.load(std::memory_order_acquire))
+    return false;
+  if (!open_ready_.load(std::memory_order_acquire))
+    return false;
+  if (!playback_initialized_ && !gpu_init_failed_)
+    initialize_after_open();
+  return playback_initialized_;
+}
+
+bool HapVideoStreamPlayback::has_failed() const {
+  return open_failed_.load(std::memory_order_acquire) || gpu_init_failed_;
+}
+
+String HapVideoStreamPlayback::get_error() const {
+  if (open_failed_.load(std::memory_order_acquire))
+    return String(open_error_.c_str());
+  if (gpu_init_failed_)
+    return "Failed to initialize GPU presenter";
+  return String();
+}
+
+void HapVideoStreamPlayback::advance_to_frame(uint32_t frame_index,
+                                              bool forward, bool retarget) {
+  if (!playback_initialized_)
+    return;
+
+  if (track_.frame_count > 0 && frame_index >= track_.frame_count)
+    frame_index = track_.frame_count - 1;
+
+  current_frame_ = frame_index;
+  current_time_ = frame_index * frame_duration_;
+
+  if (retarget)
+    scheduler_.request_frame(frame_index, forward);
+
+  present_up_to_frame(frame_index, forward);
+}
+
 uint32_t HapVideoStreamPlayback::frame_from_time(double p_time) const {
   uint32_t frame = frame_duration_ > 0.0
                        ? static_cast<uint32_t>(p_time / frame_duration_)
@@ -84,14 +123,16 @@ uint32_t HapVideoStreamPlayback::frame_from_time(double p_time) const {
 // -----------------------------------------------------------------------
 // Drain the frame queue up to and including target_frame
 // -----------------------------------------------------------------------
-void HapVideoStreamPlayback::present_up_to_frame(uint32_t target_frame) {
+void HapVideoStreamPlayback::present_up_to_frame(uint32_t target_frame,
+                                                 bool forward) {
   hap::core::FrameQueue &q = scheduler_.queue();
 
   uint32_t idx = 0;
   const hap::core::DecodedFrame *f = q.peek(&idx);
-  while (f && idx < target_frame) {
-    // Stale prefetch (shouldn't normally happen in forward playback,
-    // but seeks and frame-stepping can leave the queue briefly ahead).
+  while (f && (forward ? idx < target_frame : idx > target_frame)) {
+    // Stale prefetch: behind the target when advancing forward, or
+    // ahead of it (i.e. from before a reverse seek caught up) when
+    // advancing backward.
     q.pop();
     scheduler_.notify_capacity_available();
     f = q.peek(&idx);
