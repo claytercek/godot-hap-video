@@ -1,6 +1,7 @@
 # Godot auto-generated files
 .gen.*
 .godot/
+*.import
 
 # Build artifacts
 bin/*

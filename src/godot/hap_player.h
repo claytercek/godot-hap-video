@@ -100,7 +100,12 @@ private:
   bool needs_retarget_ = true;
   bool last_direction_forward_ = true;
 
-  uint32_t frame_from_position(double p_position) const;
+  /// Present `frame`, always retargeting the scheduler's prefetch, and
+  /// update the direction/retarget bookkeeping to match -- the shared
+  /// tail of every discontinuity (scrub, stop, step, initial present).
+  /// Steady-state playback in _process() calls advance_to_frame()
+  /// directly since its retarget flag varies.
+  void present_at(uint32_t frame, bool forward);
 };
 
 } // namespace godot

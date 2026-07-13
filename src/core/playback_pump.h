@@ -28,6 +28,15 @@ struct PumpStepResult {
 /// caller already knows this tick is a discontinuity (e.g. right
 /// after play()); the result ORs that in with a direction flip or a
 /// loop wrap detected here.
+///
+/// Known boundary behavior, not a bug: starting reverse playback
+/// (negative playback_speed) from position 0 with loop off completes
+/// on its very first tick -- there's nothing behind frame 0 to play
+/// into, symmetric with starting forward playback from `duration`.
+/// Ping-pong-style reverse (the common case) always starts from a
+/// non-zero position reached by prior forward playback, so this only
+/// surfaces if a caller explicitly sets a negative speed before ever
+/// playing forward.
 PumpStepResult pump_step(double position, double delta, double playback_speed,
                          bool loop, double duration, bool needs_retarget,
                          bool last_direction_forward);

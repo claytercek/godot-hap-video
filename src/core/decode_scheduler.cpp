@@ -87,8 +87,8 @@ void DecodeScheduler::fill_step() {
 
   bool decoded_one = false;
   bool can_decode = frame_index < samples.size() && !queue_.full() &&
-                     !(!forward &&
-                       reverse_exhausted_.load(std::memory_order_relaxed));
+                     (forward ||
+                      !reverse_exhausted_.load(std::memory_order_relaxed));
   if (can_decode) {
     const uint8_t *sample = demuxer_.sample_data(mmap_, frame_index);
     if (sample) {

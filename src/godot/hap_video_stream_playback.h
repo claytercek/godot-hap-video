@@ -77,6 +77,13 @@ public:
   /// in flight. A no-op until is_ready().
   void advance_to_frame(uint32_t frame_index, bool forward, bool retarget);
 
+  /// Convert a playback-position time to a frame index, clamped to the
+  /// track's valid frame range. Degrades to 0 gracefully before
+  /// is_ready() (frame_duration_/track_.frame_count are still their
+  /// zero defaults). Shared by both layers: Layer 1's own time-based
+  /// _seek()/_update() and HapPlayer's frame-based pump.
+  uint32_t frame_from_time(double p_time) const;
+
   virtual void _stop() override;
   virtual void _play() override;
   virtual bool _is_playing() const override;
@@ -136,11 +143,6 @@ private:
   /// `forward` is false, at or before it). Frames on the wrong side of
   /// the target are stale prefetch and are discarded.
   void present_up_to_frame(uint32_t target_frame, bool forward = true);
-
-  /// Convert a playback-position time to a frame index, clamped to the
-  /// track's valid frame range. Only meaningful once track_ is populated
-  /// (after initialize_after_open()).
-  uint32_t frame_from_time(double p_time) const;
 };
 
 } // namespace godot

@@ -116,12 +116,8 @@ void HapPlayer::set_stream_position(double p_position) {
   position_ = p_position;
   needs_retarget_ = true;
 
-  if (playback_.is_valid() && playback_->is_ready()) {
-    bool forward = playback_speed_ >= 0.0;
-    playback_->advance_to_frame(frame_from_position(position_), forward, true);
-    last_direction_forward_ = forward;
-    needs_retarget_ = false;
-  }
+  if (playback_.is_valid() && playback_->is_ready())
+    present_at(playback_->frame_from_time(position_), playback_speed_ >= 0.0);
 }
 
 void HapPlayer::play() {
@@ -139,10 +135,8 @@ void HapPlayer::stop() {
   needs_retarget_ = true;
   last_direction_forward_ = true;
 
-  if (playback_.is_valid() && playback_->is_ready()) {
-    playback_->advance_to_frame(0, /*forward=*/true, /*retarget=*/true);
-    needs_retarget_ = false;
-  }
+  if (playback_.is_valid() && playback_->is_ready())
+    present_at(0, /*forward=*/true);
 }
 
 void HapPlayer::step_frame(int32_t n) {
@@ -155,20 +149,18 @@ void HapPlayer::step_frame(int32_t n) {
     paused_ = true;
 
   int32_t frame_count = playback_->get_frame_count();
-  int32_t current_frame = static_cast<int32_t>(frame_from_position(position_));
+  int32_t current_frame =
+      static_cast<int32_t>(playback_->frame_from_time(position_));
   int32_t target = current_frame + n;
   if (target < 0)
     target = 0;
   if (frame_count > 0 && target >= frame_count)
     target = frame_count - 1;
 
-  bool forward = n >= 0;
   double frame_rate = playback_->get_frame_rate();
   position_ = frame_rate > 0.0 ? target / frame_rate : 0.0;
 
-  playback_->advance_to_frame(static_cast<uint32_t>(target), forward, true);
-  last_direction_forward_ = forward;
-  needs_retarget_ = false;
+  present_at(static_cast<uint32_t>(target), /*forward=*/n >= 0);
 }
 
 Ref<Texture2D> HapPlayer::get_texture() const {
@@ -197,17 +189,10 @@ int32_t HapPlayer::get_frame_count() const {
   return playback_.is_valid() ? playback_->get_frame_count() : 0;
 }
 
-uint32_t HapPlayer::frame_from_position(double p_position) const {
-  if (playback_.is_null() || !playback_->is_ready())
-    return 0;
-
-  double frame_rate = playback_->get_frame_rate();
-  int32_t frame_count = playback_->get_frame_count();
-  uint32_t frame =
-      frame_rate > 0.0 ? static_cast<uint32_t>(p_position * frame_rate) : 0;
-  if (frame_count > 0 && frame >= static_cast<uint32_t>(frame_count))
-    frame = static_cast<uint32_t>(frame_count) - 1;
-  return frame;
+void HapPlayer::present_at(uint32_t frame, bool forward) {
+  playback_->advance_to_frame(frame, forward, /*retarget=*/true);
+  last_direction_forward_ = forward;
+  needs_retarget_ = false;
 }
 
 void HapPlayer::_ready() { set_process(true); }
@@ -223,10 +208,7 @@ void HapPlayer::_process(double p_delta) {
     // Materialize the current (possibly pre-set) position's frame
     // immediately, so get_texture() is valid the instant `opened`
     // fires -- before any handler calls play().
-    bool forward = playback_speed_ >= 0.0;
-    playback_->advance_to_frame(frame_from_position(position_), forward, true);
-    last_direction_forward_ = forward;
-    needs_retarget_ = false;
+    present_at(playback_->frame_from_time(position_), playback_speed_ >= 0.0);
 
     emit_signal("opened");
     if (autoplay_)
@@ -254,8 +236,8 @@ void HapPlayer::_process(double p_delta) {
   if (step.completed)
     active_ = false;
 
-  playback_->advance_to_frame(frame_from_position(position_), step.forward,
-                              step.retarget);
+  playback_->advance_to_frame(playback_->frame_from_time(position_),
+                              step.forward, step.retarget);
 
   if (step.looped)
     emit_signal("playback_looped");
