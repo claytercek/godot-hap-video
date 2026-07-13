@@ -40,10 +40,6 @@ public:
   bool decode(const uint8_t *input, size_t input_size,
               DecodedFrame &output);
 
-  /// Get the maximum output buffer size needed for a given frame.
-  /// This is approximate; actual sizes are determined after decode.
-  static size_t max_output_size(const uint8_t *input, size_t input_size);
-
 private:
   /// Temporary output buffer for the decoded texture data.
   /// Reused across decode calls to avoid reallocation.

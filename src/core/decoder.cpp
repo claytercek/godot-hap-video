@@ -34,42 +34,35 @@ bool Decoder::decode(const uint8_t *input, size_t input_size,
       return false;
     }
 
-    // Get chunk count to estimate output size
-    int chunk_count = 0;
-    HapGetFrameTextureChunkCount(
-        input, static_cast<unsigned long>(input_size), i, &chunk_count);
-
     // Allocate a generous output buffer. We grow it as needed.
     // The maximum size for BC-compressed data is the full input size
-    // (uncompressed worst case). For safety, use input_size * 2.
+    // (uncompressed worst case). For safety, use input_size * 1.5.
     size_t max_size = static_cast<size_t>(static_cast<double>(input_size) * 1.5);
     if (max_size < 1024 * 1024)
       max_size = 1024 * 1024; // Minimum 1 MB
     if (temp_buffer_.size() < max_size)
       temp_buffer_.resize(max_size);
 
+    // Decode into temp_buffer_. If it's too small, hap.c reports the exact
+    // bytes needed via bytes_used; grow to 1.5x that and retry once.
     unsigned long bytes_used = 0;
-    result = HapDecode(input, static_cast<unsigned long>(input_size), i,
-                       hap_inner_decode_callback, nullptr, temp_buffer_.data(),
-                       static_cast<unsigned long>(temp_buffer_.size()),
-                       &bytes_used, &texture_format);
-    if (result != HapResult_No_Error) {
-      // Buffer too small? Grow and try again
-      if (result == HapResult_Buffer_Too_Small) {
-        max_size = static_cast<size_t>(bytes_used * 1.5);
-        temp_buffer_.resize(max_size);
-        result = HapDecode(
-            input, static_cast<unsigned long>(input_size), i,
-            hap_inner_decode_callback, nullptr, temp_buffer_.data(),
-            static_cast<unsigned long>(temp_buffer_.size()), &bytes_used,
-            &texture_format);
-        if (result != HapResult_No_Error) {
-          return false;
-        }
-      } else {
-        return false;
+    bool decoded = false;
+    for (int attempt = 0; attempt < 2; attempt++) {
+      result = HapDecode(input, static_cast<unsigned long>(input_size), i,
+                         hap_inner_decode_callback, nullptr,
+                         temp_buffer_.data(),
+                         static_cast<unsigned long>(temp_buffer_.size()),
+                         &bytes_used, &texture_format);
+      if (result == HapResult_No_Error) {
+        decoded = true;
+        break;
       }
+      if (result != HapResult_Buffer_Too_Small)
+        return false;
+      temp_buffer_.resize(static_cast<size_t>(bytes_used * 1.5));
     }
+    if (!decoded)
+      return false;
 
     // Copy decoded data into the output
     auto &tex = output.textures[i];
@@ -78,13 +71,6 @@ bool Decoder::decode(const uint8_t *input, size_t input_size,
   }
 
   return true;
-}
-
-size_t Decoder::max_output_size(const uint8_t *input, size_t input_size) {
-  // For an uncompressed frame (worst case), the decoded size equals the
-  // compressed size (since unpacked = raw block data). For snappy-compressed,
-  // it can be slightly larger. Use a heuristic: 2x input size.
-  return input_size * 2;
 }
 
 } // namespace core

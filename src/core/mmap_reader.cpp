@@ -88,7 +88,6 @@ bool MmapReader::open(const std::string &path) {
   }
 
   data_ = static_cast<uint8_t *>(MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0));
-  DWORD mapErr = GetLastError();
   CloseHandle(hMapping);
   CloseHandle(hFile);
 

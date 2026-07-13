@@ -3,7 +3,6 @@
 
 #include "hap_frame.h"
 
-#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <vector>
@@ -25,11 +24,12 @@ namespace core {
 /// on capacity when shrinking or matching, so steady-state playback
 /// never reallocates.
 ///
-/// Internally guarded by a mutex/condvar rather than lock-free atomics:
-/// decode times (microseconds-to-milliseconds) dwarf lock overhead, and
-/// the SPSC *usage* contract (one producer thread, one consumer thread)
-/// is what callers must honor — the mutex only makes violations safe
-/// rather than undefined.
+/// Internally guarded by a mutex rather than lock-free atomics: decode
+/// times (microseconds-to-milliseconds) dwarf lock overhead, and the SPSC
+/// *usage* contract (one producer thread, one consumer thread) is what
+/// callers must honor — the mutex only makes violations safe rather than
+/// undefined. The consumer polls (peek/empty) rather than blocking, so
+/// there is no condition variable to wait on.
 class FrameQueue {
 public:
   explicit FrameQueue(size_t depth = 4) : slots_(depth) {}
@@ -67,11 +67,9 @@ public:
 
   /// Producer: publish the frame written via the last begin_write() call.
   void commit_write() {
-    std::unique_lock<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     write_pos_ = (write_pos_ + 1) % slots_.size();
     count_++;
-    lock.unlock();
-    cv_.notify_one();
   }
 
   /// Consumer: peek the oldest committed frame without removing it.
@@ -114,7 +112,6 @@ private:
   };
 
   mutable std::mutex mutex_;
-  std::condition_variable cv_;
   std::vector<Slot> slots_;
   size_t write_pos_ = 0;
   size_t read_pos_ = 0;

@@ -9,9 +9,8 @@ PumpStepResult pump_step(double position, double delta, double playback_speed,
                          bool loop, double duration, bool needs_retarget,
                          bool last_direction_forward) {
   bool forward = playback_speed >= 0.0;
-  double speed = forward ? playback_speed : -playback_speed;
 
-  double new_position = position + (forward ? speed : -speed) * delta;
+  double new_position = position + playback_speed * delta;
 
   PumpStepResult result;
   result.forward = forward;
