@@ -1,6 +1,7 @@
 #ifndef HAP_PLAYER_H
 #define HAP_PLAYER_H
 
+#include "core/playback_pump.h"
 #include "hap_video_stream.h"
 #include "hap_video_stream_playback.h"
 

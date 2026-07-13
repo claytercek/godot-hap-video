@@ -3,8 +3,6 @@
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/error_macros.hpp>
 
-#include <cmath>
-
 namespace godot {
 
 void HapPlayer::_bind_methods() {
@@ -55,6 +53,26 @@ void HapPlayer::_bind_methods() {
   ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "stream_position"),
                "set_stream_position", "get_stream_position");
   ADD_PROPERTY(PropertyInfo(Variant::BOOL, "paused"), "set_paused", "is_paused");
+
+  // Read-only metadata, valid after `opened` -- no setter, so scripts
+  // read them as plain properties (player.frame_rate, not
+  // player.get_frame_rate()) via dot access, matching the spec's
+  // property list.
+  ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "frame_rate", PROPERTY_HINT_NONE, "",
+                            PROPERTY_USAGE_READ_ONLY),
+               "", "get_frame_rate");
+  ADD_PROPERTY(PropertyInfo(Variant::INT, "width", PROPERTY_HINT_NONE, "",
+                            PROPERTY_USAGE_READ_ONLY),
+               "", "get_width");
+  ADD_PROPERTY(PropertyInfo(Variant::INT, "height", PROPERTY_HINT_NONE, "",
+                            PROPERTY_USAGE_READ_ONLY),
+               "", "get_height");
+  ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "duration", PROPERTY_HINT_NONE, "",
+                            PROPERTY_USAGE_READ_ONLY),
+               "", "get_duration");
+  ADD_PROPERTY(PropertyInfo(Variant::INT, "frame_count", PROPERTY_HINT_NONE, "",
+                            PROPERTY_USAGE_READ_ONLY),
+               "", "get_frame_count");
 
   ADD_SIGNAL(MethodInfo("opened"));
   ADD_SIGNAL(MethodInfo("playback_completed"));
@@ -226,47 +244,22 @@ void HapPlayer::_process(double p_delta) {
   if (!now_ready || !active_ || paused_)
     return;
 
-  bool forward = playback_speed_ >= 0.0;
-  double speed = forward ? playback_speed_ : -playback_speed_;
-  double duration = playback_->_get_length();
+  hap::core::PumpStepResult step = hap::core::pump_step(
+      position_, p_delta, playback_speed_, loop_, playback_->_get_length(),
+      needs_retarget_, last_direction_forward_);
 
-  double new_position = position_ + (forward ? speed : -speed) * p_delta;
-
-  bool retarget = needs_retarget_ || forward != last_direction_forward_;
-  bool looped = false;
-  bool completed = false;
-
-  if (forward && new_position >= duration) {
-    if (loop_ && duration > 0.0) {
-      new_position = std::fmod(new_position, duration);
-      looped = true;
-      retarget = true;
-    } else {
-      new_position = duration;
-      completed = true;
-      active_ = false;
-    }
-  } else if (!forward && new_position <= 0.0) {
-    if (loop_ && duration > 0.0) {
-      new_position = duration - std::fmod(-new_position, duration);
-      looped = true;
-      retarget = true;
-    } else {
-      new_position = 0.0;
-      completed = true;
-      active_ = false;
-    }
-  }
-
-  position_ = new_position;
+  position_ = step.position;
   needs_retarget_ = false;
-  last_direction_forward_ = forward;
+  last_direction_forward_ = step.forward;
+  if (step.completed)
+    active_ = false;
 
-  playback_->advance_to_frame(frame_from_position(position_), forward, retarget);
+  playback_->advance_to_frame(frame_from_position(position_), step.forward,
+                              step.retarget);
 
-  if (looped)
+  if (step.looped)
     emit_signal("playback_looped");
-  if (completed)
+  if (step.completed)
     emit_signal("playback_completed");
 }
 

@@ -167,6 +167,7 @@ if ARGUMENTS.get("build_tests", "0") == "1":
         "tests/core/test_decoder.cpp",
         "tests/core/test_concurrency.cpp",
         "tests/core/test_scheduler.cpp",
+        "tests/core/test_playback_pump.cpp",
     ]
 
     if sys.platform != "win32":
@@ -184,6 +185,7 @@ if ARGUMENTS.get("build_tests", "0") == "1":
             "build/src/core/outer_thread_pool.os",
             "build/src/core/decode_scheduler.os",
             "build/src/core/mmap_reader.os",
+            "build/src/core/playback_pump.os",
         ]
         test_bin = test_env.Program(
             "build/tests/{}".format(basename),
