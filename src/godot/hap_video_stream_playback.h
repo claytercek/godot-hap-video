@@ -27,7 +27,7 @@ namespace godot {
 /// returns immediately; nothing here blocks the main thread. Until the
 /// async open completes, playback virtuals report harmless defaults.
 class HapVideoStreamPlayback : public VideoStreamPlayback {
-  GDEXTENSION_CLASS(HapVideoStreamPlayback, VideoStreamPlayback)
+  GDCLASS(HapVideoStreamPlayback, VideoStreamPlayback)
 
 public:
   ~HapVideoStreamPlayback() override {
@@ -92,10 +92,7 @@ public:
   virtual int32_t _get_mix_rate() const override;
 
 protected:
-  template <typename T, typename B>
-  static void register_virtuals() {
-    VideoStreamPlayback::register_virtuals<T, B>();
-  }
+  static void _bind_methods() {}
 
 private:
   // Async decode pipeline (Godot-free core).

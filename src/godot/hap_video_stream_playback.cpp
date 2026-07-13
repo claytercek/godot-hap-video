@@ -2,6 +2,7 @@
 
 #include "core/hap_frame.h"
 
+#include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/rendering_device.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/core/class_db.hpp>
@@ -19,7 +20,12 @@ bool HapVideoStreamPlayback::open(const String &p_path) {
     return false;
   }
 
-  std::string path = p_path.utf8().get_data();
+  // The core demuxer mmaps the file directly, so it needs a real
+  // filesystem path -- res:// and user:// are Godot virtual-filesystem
+  // prefixes FileAccess resolves internally, but mmap() has no idea
+  // about them. Absolute paths pass through globalize_path() unchanged.
+  String real_path = ProjectSettings::get_singleton()->globalize_path(p_path);
+  std::string path = real_path.utf8().get_data();
 
   // The async open callback runs on an outer-pool worker thread and may
   // fire after this object is gone; alive_ (kept alive by the shared_ptr
