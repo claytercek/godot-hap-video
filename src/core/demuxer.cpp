@@ -255,12 +255,15 @@ bool Demuxer::validate_samples(const std::vector<SampleEntry> &samples,
 // -----------------------------------------------------------------------
 // Destructor / Move
 // -----------------------------------------------------------------------
-void Demuxer::cleanup_mp4() {
-  if (mp4_) {
-    MP4D_close(mp4_);
-    delete mp4_;
-    mp4_ = nullptr;
+void MP4DemuxDeleter::operator()(MP4D_demux_t *ptr) const {
+  if (ptr) {
+    MP4D_close(ptr);
+    delete ptr;
   }
+}
+
+void Demuxer::cleanup_mp4() {
+  mp4_.reset();
 }
 
 Demuxer::~Demuxer() {
@@ -268,21 +271,18 @@ Demuxer::~Demuxer() {
 }
 
 Demuxer::Demuxer(Demuxer &&other) noexcept
-    : mp4_(other.mp4_), valid_(other.valid_), track_(other.track_),
+    : mp4_(std::move(other.mp4_)), valid_(other.valid_), track_(other.track_),
       samples_(std::move(other.samples_)), file_size_(other.file_size_) {
-  other.mp4_ = nullptr;
   other.valid_ = false;
 }
 
 Demuxer &Demuxer::operator=(Demuxer &&other) noexcept {
   if (this != &other) {
-    cleanup_mp4();
-    mp4_ = other.mp4_;
+    mp4_ = std::move(other.mp4_);
     valid_ = other.valid_;
     track_ = other.track_;
     samples_ = std::move(other.samples_);
     file_size_ = other.file_size_;
-    other.mp4_ = nullptr;
     other.valid_ = false;
   }
   return *this;
@@ -299,18 +299,18 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
   file_size_ = reader.size();
 
   // Allocate and initialize minimp4 context
-  mp4_ = new (std::nothrow) MP4D_demux_t();
+  mp4_.reset(new (std::nothrow) MP4D_demux_t());
   if (!mp4_) {
     result.error_message = "Out of memory allocating demux context";
     return result;
   }
-  std::memset(mp4_, 0, sizeof(*mp4_));
+  std::memset(mp4_.get(), 0, sizeof(*mp4_));
 
   ReadContext read_ctx;
   read_ctx.data = reader.data();
   read_ctx.size = static_cast<int64_t>(reader.size());
 
-  if (!MP4D_open(mp4_, minimp4_read, &read_ctx, read_ctx.size)) {
+  if (!MP4D_open(mp4_.get(), minimp4_read, &read_ctx, read_ctx.size)) {
     result.error_message = "Failed to open/parse MOV file";
     cleanup_mp4();
     return result;
@@ -405,7 +405,7 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
     unsigned int timestamp = 0;
     unsigned int duration = 0;
     MP4D_file_offset_t offset = MP4D_frame_offset(
-        mp4_, hap_track_index, i, &frame_bytes, &timestamp, &duration);
+        mp4_.get(), hap_track_index, i, &frame_bytes, &timestamp, &duration);
 
     SampleEntry entry;
     entry.offset = static_cast<uint64_t>(offset);
@@ -433,7 +433,7 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
     unsigned int frame_bytes = 0;
     unsigned int timestamp = 0;
     unsigned int duration = 0;
-    MP4D_frame_offset(mp4_, hap_track_index, 0, &frame_bytes, &timestamp,
+    MP4D_frame_offset(mp4_.get(), hap_track_index, 0, &frame_bytes, &timestamp,
                       &duration);
     if (duration > 0 && mp4_track.timescale > 0) {
       track_.frame_rate =

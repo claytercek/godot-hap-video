@@ -4,6 +4,7 @@
 #include "hap_frame.h"
 #include "mmap_reader.h"
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,12 @@ typedef struct MP4D_demux_tag MP4D_demux_t;
 
 namespace hap {
 namespace core {
+
+/// Frees a minimp4 demux context via MP4D_close before releasing the
+/// struct. Defined in demuxer.cpp, where MP4D_demux_t is a complete type.
+struct MP4DemuxDeleter {
+  void operator()(MP4D_demux_t *ptr) const;
+};
 
 /// Demuxer for Hap-encoded MOV files.
 ///
@@ -62,7 +69,7 @@ public:
                                uint64_t file_size, std::string &error);
 
 private:
-  MP4D_demux_t *mp4_ = nullptr; // Owned heap-allocated minimp4 context
+  std::unique_ptr<MP4D_demux_t, MP4DemuxDeleter> mp4_;
   bool valid_ = false;
   VideoTrackInfo track_;
   std::vector<SampleEntry> samples_;
