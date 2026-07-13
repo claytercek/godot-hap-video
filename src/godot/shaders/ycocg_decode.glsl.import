@@ -1,0 +1,13 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://yriciuk3eaw5"
+valid=false
+
+[deps]
+
+source_file="res://src/godot/shaders/ycocg_decode.glsl"
+
+[params]
+

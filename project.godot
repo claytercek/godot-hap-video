@@ -4,4 +4,4 @@
 [application]
 config/name="Hap Video Test"
 config/features=PackedStringArray("4.4")
-run/main_scene=""
+run/main_scene="res://demo/hap_player_demo.tscn"
