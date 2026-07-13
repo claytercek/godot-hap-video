@@ -1,6 +1,8 @@
 #ifndef HAP_VIDEO_STREAM_H
 #define HAP_VIDEO_STREAM_H
 
+#include "hap_video_stream_playback.h"
+
 #include <godot_cpp/classes/ref.hpp>
 #include <godot_cpp/classes/resource.hpp>
 #include <godot_cpp/classes/video_stream.hpp>
@@ -8,10 +10,8 @@
 
 namespace godot {
 
-class HapVideoStreamPlayback;
-
 class HapVideoStream : public VideoStream {
-  GDEXTENSION_CLASS(HapVideoStream, VideoStream)
+  GDCLASS(HapVideoStream, VideoStream)
 
 public:
   void set_file(const String &p_file);
@@ -20,10 +20,7 @@ public:
   virtual Ref<VideoStreamPlayback> _instantiate_playback() override;
 
 protected:
-  template <typename T, typename B>
-  static void register_virtuals() {
-    VideoStream::register_virtuals<T, B>();
-  }
+  static void _bind_methods();
 
 private:
   String file_path;

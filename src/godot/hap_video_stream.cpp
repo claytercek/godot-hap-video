@@ -7,6 +7,13 @@
 
 namespace godot {
 
+void HapVideoStream::_bind_methods() {
+  ClassDB::bind_method(D_METHOD("set_file", "file"), &HapVideoStream::set_file);
+  ClassDB::bind_method(D_METHOD("get_file"), &HapVideoStream::get_file);
+  ADD_PROPERTY(PropertyInfo(Variant::STRING, "file", PROPERTY_HINT_FILE, "*.mov"),
+               "set_file", "get_file");
+}
+
 void HapVideoStream::set_file(const String &p_file) {
   file_path = p_file;
 }
