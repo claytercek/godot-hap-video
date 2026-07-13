@@ -1,0 +1,96 @@
+name: Release
+
+# Runs when release-please publishes a GitHub release: builds debug +
+# release binaries for all three platforms, assembles the self-contained
+# addon directory (binaries, .gdextension manifest, licenses), and
+# attaches the packaged zip to the release.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-deps
+
+      - name: Build (template_debug)
+        run: scons target=template_debug
+
+      - name: Build (template_release)
+        run: scons target=template_release
+
+      - name: Upload addon artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: addon-${{ matrix.os }}
+          path: addons/hap_video/
+          if-no-files-found: error
+
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # Each platform artifact contains the same manifest/licenses
+          # plus its own platform/ binary subdirectory; merging yields
+          # the complete addon.
+          pattern: addon-*
+          path: package/addons/hap_video/
+          merge-multiple: true
+
+      - name: Verify addon completeness
+        run: |
+          cd package/addons/hap_video
+          for f in \
+            hap_video.gdextension \
+            LICENSE.md \
+            licenses/LICENSE-hap.txt \
+            licenses/LICENSE-snappy.txt \
+            licenses/LICENSE-minimp4.txt \
+            licenses/LICENSE-godot-cpp.txt \
+            macos/libhap_video.macos.template_debug.dylib \
+            macos/libhap_video.macos.template_release.dylib \
+            windows/libhap_video.windows.template_debug.x86_64.dll \
+            windows/libhap_video.windows.template_release.x86_64.dll \
+            linux/libhap_video.linux.template_debug.x86_64.so \
+            linux/libhap_video.linux.template_release.x86_64.so
+          do
+            [ -f "$f" ] || { echo "missing: $f"; exit 1; }
+          done
+
+      - name: Create addon zip
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          cd package
+          zip -r "../hap-video-${TAG}.zip" addons
+
+      - name: Attach zip to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$TAG" "hap-video-${TAG}.zip" \
+            --repo "${{ github.repository }}"
