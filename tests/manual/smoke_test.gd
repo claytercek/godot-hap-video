@@ -1,18 +1,16 @@
 extends SceneTree
 
+const SmokeCommon = preload("res://tests/manual/smoke_common.gd")
+
 var player: HapPlayer
-var opened_fired := false
 var looped_count := 0
 var completed_fired := false
 var error_message := ""
 
 func _init():
-	var stream = HapVideoStream.new()
-	stream.set_file("res://tests/fixtures/hap1.mov")
+	var stream = SmokeCommon.make_stream("res://tests/fixtures/hap1.mov")
 
-	player = HapPlayer.new()
-	root.add_child(player)
-	player.connect("opened", _on_opened)
+	player = SmokeCommon.make_player(self)
 	player.connect("playback_looped", _on_looped)
 	player.connect("playback_completed", _on_completed)
 	player.connect("error_occurred", _on_error)
@@ -21,10 +19,7 @@ func _init():
 	player.playback_speed = 1.0
 	player.stream = stream
 
-	for i in range(120):
-		await process_frame
-		if opened_fired:
-			break
+	var opened_fired = await SmokeCommon.wait_for_opened(self, player)
 
 	print("opened_fired: ", opened_fired)
 	print("error_message: ", error_message)
@@ -61,10 +56,6 @@ func _init():
 	print("looped_count so far: ", looped_count)
 
 	quit()
-
-func _on_opened():
-	opened_fired = true
-	print("SIGNAL: opened")
 
 func _on_looped():
 	looped_count += 1
