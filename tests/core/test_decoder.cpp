@@ -10,6 +10,7 @@
 #include "core/demuxer.h"
 #include "core/hap_frame.h"
 #include "core/mmap_reader.h"
+#include "core/outer_thread_pool.h"
 #include "core/thread_pool.h"
 
 #include "hap.h"
@@ -433,22 +434,22 @@ HAP_TEST(test_decoder_hap5_fixture_frame0) {
   Demuxer demuxer;
   auto result = demuxer.open(reader);
   HAP_ASSERT(result.valid);
-  HAP_ASSERT(result.track.fourcc == FCC_Hap5);
-  HAP_ASSERT(result.track.frame_count > 0);
+  HAP_ASSERT(demuxer.track_info().fourcc == FCC_Hap5);
+  HAP_ASSERT(demuxer.track_info().frame_count > 0);
 
   const uint8_t *sample = demuxer.sample_data(reader, 0);
   HAP_ASSERT(sample != nullptr);
 
   Decoder decoder;
   DecodedFrame output;
-  HAP_ASSERT(decoder.decode(sample, result.samples[0].size, output));
+  HAP_ASSERT(decoder.decode(sample, demuxer.samples()[0].size, output));
   HAP_ASSERT_EQ(output.textures.size(), 1u);
 
   const auto &tex = output.textures[0];
   HAP_ASSERT(tex.format == hap::core::HapTextureFormat::RGBA_DXT5);
   // Decoded size must match the BC3 block byte count for the track dimensions.
   HAP_ASSERT_EQ(tex.data.size(),
-               static_cast<size_t>(result.track.frame_bytes()));
+               static_cast<size_t>(demuxer.track_info().frame_bytes()));
 }
 
 HAP_TEST(test_decoder_hap7_fixture_frame0) {
@@ -464,21 +465,21 @@ HAP_TEST(test_decoder_hap7_fixture_frame0) {
   Demuxer demuxer;
   auto result = demuxer.open(reader);
   HAP_ASSERT(result.valid);
-  HAP_ASSERT(result.track.fourcc == FCC_Hap7);
-  HAP_ASSERT(result.track.frame_count > 0);
+  HAP_ASSERT(demuxer.track_info().fourcc == FCC_Hap7);
+  HAP_ASSERT(demuxer.track_info().frame_count > 0);
 
   const uint8_t *sample = demuxer.sample_data(reader, 0);
   HAP_ASSERT(sample != nullptr);
 
   Decoder decoder;
   DecodedFrame output;
-  HAP_ASSERT(decoder.decode(sample, result.samples[0].size, output));
+  HAP_ASSERT(decoder.decode(sample, demuxer.samples()[0].size, output));
   HAP_ASSERT_EQ(output.textures.size(), 1u);
 
   const auto &tex = output.textures[0];
   HAP_ASSERT(tex.format == hap::core::HapTextureFormat::RGBA_BPTC_UNORM);
   HAP_ASSERT_EQ(tex.data.size(),
-               static_cast<size_t>(result.track.frame_bytes()));
+               static_cast<size_t>(demuxer.track_info().frame_bytes()));
 }
 
 // -----------------------------------------------------------------------
@@ -693,11 +694,11 @@ static bool decode_fixture_frame(const std::string &path,
     return false;
 
   const uint8_t *sample = demuxer.sample_data(reader, 0);
-  if (!sample || result.samples.empty())
+  if (!sample || demuxer.samples().empty())
     return false;
 
   hap::core::Decoder decoder;
-  return decoder.decode(sample, result.samples[0].size, out);
+  return decoder.decode(sample, demuxer.samples()[0].size, out);
 }
 
 /// Check that chunked and unchunked fixture decode to byte-identical output.
@@ -891,9 +892,10 @@ HAP_TEST(test_thread_pool_basic) {
   HAP_ASSERT(pool.worker_count() >= 1);
 
   // Verify the thread count matches the formula
-  // max(1, hardware_concurrency - 3)
+  // max(1, hardware_concurrency - kDefaultWorkers)
   unsigned int hw = std::thread::hardware_concurrency();
-  unsigned int expected = (hw > 3) ? (hw - 3) : 1;
+  unsigned int outer = OuterThreadPool::kDefaultWorkers;
+  unsigned int expected = (hw > outer) ? (hw - outer) : 1;
   HAP_ASSERT_EQ(pool.worker_count(), expected);
 }
 

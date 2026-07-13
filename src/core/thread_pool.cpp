@@ -1,14 +1,16 @@
 #include "thread_pool.h"
 
+#include "outer_thread_pool.h"
+
 #include <algorithm>
 #include <thread>
 
 namespace hap {
 namespace core {
 
-// Default outer worker count, matching the outer pool's default size.
-// Inner pool = max(1, hardware_concurrency - outer_workers).
-static constexpr unsigned int kOuterWorkers = 3;
+// Inner pool = max(1, hardware_concurrency - outer_workers), where the
+// outer worker count is OuterThreadPool::kDefaultWorkers.
+static constexpr unsigned int kOuterWorkers = OuterThreadPool::kDefaultWorkers;
 
 // -----------------------------------------------------------------------
 // Singleton
@@ -96,7 +98,6 @@ void InnerThreadPool::execute(HapDecodeWorkFunction func, void *p,
     std::lock_guard<std::mutex> lock(mutex_);
     func_ = func;
     p_ = p;
-    total_count_ = count;
     remaining_ = num_workers_;
     work_batch_.fetch_add(1, std::memory_order_release);
   }
@@ -115,7 +116,6 @@ void InnerThreadPool::execute(HapDecodeWorkFunction func, void *p,
     // Reset shared state for next invocation.
     func_ = nullptr;
     p_ = nullptr;
-    total_count_ = 0;
   }
 }
 

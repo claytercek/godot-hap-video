@@ -202,9 +202,10 @@ HAP_TEST(frame_queue_concurrent_producer_consumer) {
 // -----------------------------------------------------------------------
 
 HAP_TEST(outer_pool_default_worker_count_matches_spec) {
-  // Spec default: 3 shared outer workers.
+  // Spec default: kDefaultWorkers shared outer workers.
   HAP_ASSERT_EQ(OuterThreadPool::instance().worker_count(),
-                std::min(3u, std::max(1u, std::thread::hardware_concurrency())));
+                std::min(OuterThreadPool::kDefaultWorkers,
+                         std::max(1u, std::thread::hardware_concurrency())));
 }
 
 HAP_TEST(outer_pool_serializes_jobs_within_a_stream) {

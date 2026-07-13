@@ -73,7 +73,6 @@ private:
   /// Shared work state, set by execute() before waking workers.
   HapDecodeWorkFunction func_ = nullptr;
   void *p_ = nullptr;
-  unsigned int total_count_ = 0;
   unsigned int remaining_ = 0;
 
   /// Monotonically increasing batch counter. Workers track their last seen

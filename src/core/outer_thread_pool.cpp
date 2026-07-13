@@ -5,11 +5,6 @@
 namespace hap {
 namespace core {
 
-// Default outer worker count. Kept in sync with thread_pool.cpp's
-// kOuterWorkers so InnerThreadPool's max(1, hardware_concurrency -
-// outer_workers) formula matches the pool actually running here.
-static constexpr unsigned int kDefaultOuterWorkers = 3;
-
 OuterThreadPool &OuterThreadPool::instance() {
   static OuterThreadPool pool;
   return pool;
@@ -18,8 +13,8 @@ OuterThreadPool &OuterThreadPool::instance() {
 OuterThreadPool::OuterThreadPool() {
   unsigned int hw = std::thread::hardware_concurrency();
   if (hw == 0)
-    hw = kDefaultOuterWorkers;
-  num_workers_ = std::min(kDefaultOuterWorkers, hw);
+    hw = kDefaultWorkers;
+  num_workers_ = std::min(kDefaultWorkers, hw);
   if (num_workers_ < 1)
     num_workers_ = 1;
 

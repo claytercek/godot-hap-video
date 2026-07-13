@@ -32,6 +32,11 @@ class OuterThreadPool {
 public:
   using Job = std::function<void()>;
 
+  /// Default worker count, shared process-wide. InnerThreadPool derives its
+  /// own size as max(1, hardware_concurrency - kDefaultWorkers), so both
+  /// pools stay consistent from this single definition.
+  static constexpr unsigned int kDefaultWorkers = 3;
+
   /// Access the shared instance. Created on first access.
   static OuterThreadPool &instance();
 
