@@ -26,7 +26,13 @@ Ref<VideoStreamPlayback> HapVideoStream::_instantiate_playback() {
   Ref<HapVideoStreamPlayback> playback;
   playback.instantiate();
 
-  if (!playback->open(file_path)) {
+  // The stock VideoStreamPlayer caches playback->get_texture() as soon as
+  // the stream is set and expects a texture with its final size (as with
+  // the engine's synchronous Theora open). Block here until the open
+  // settles and materialize the GPU resources, so the drop-in layer gets
+  // synchronous-open semantics; HapPlayer keeps the async path.
+  if (!playback->open(file_path) || !playback->wait_for_open() ||
+      !playback->poll_ready()) {
     ERR_PRINT("HapVideo: Failed to open: " + file_path);
     return Ref<VideoStreamPlayback>();
   }

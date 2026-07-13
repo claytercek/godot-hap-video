@@ -50,6 +50,13 @@ public:
   /// is_ready().
   bool poll_ready();
 
+  /// Block until the async open settles (ready or failed). Used by the
+  /// drop-in layer only: the stock VideoStreamPlayer caches the display
+  /// texture when the stream is set and expects it to already have its
+  /// real size, so that path needs synchronous-open semantics. HapPlayer
+  /// never calls this. Returns whether the open succeeded.
+  bool wait_for_open();
+
   /// True once metadata and the presented texture are valid (post
   /// async-open + GPU init).
   bool is_ready() const { return playback_initialized_; }

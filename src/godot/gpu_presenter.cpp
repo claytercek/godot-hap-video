@@ -126,6 +126,14 @@ RenderingDevice::DataFormat GpuPresenter::hap_format_to_rd(
 // -----------------------------------------------------------------------
 // Constructor / Destructor
 // -----------------------------------------------------------------------
+GpuPresenter::GpuPresenter() {
+  // The stable display texture exists from construction: the stock
+  // VideoStreamPlayer caches playback->get_texture() once when the stream
+  // is set (before the async open finishes), so it must always receive
+  // the one object whose RID is re-pointed later.
+  display_texture_.instantiate();
+}
+
 GpuPresenter::~GpuPresenter() {
   cleanup();
 }
@@ -164,14 +172,32 @@ bool GpuPresenter::initialize(RenderingDevice *rd, int width, int height,
       return false;
     }
 
-    // Create the stable Texture2DRD and point it to the first output slot
-    display_texture_.instantiate();
+    // Point the stable Texture2DRD at the first output slot
     display_texture_->set_texture_rd_rid(output_textures_[ring_.current_slot()]);
-
   } else {
-    // Pass-through path: RS textures are created lazily on first
-    // present() when the format is known.
-    display_texture_.instantiate();
+    // Pass-through path: the frame format is fixed per variant, so the BC
+    // ring can be created now and the display texture pointed at it. The
+    // texture must report its real size from initialization on: the stock
+    // VideoStreamPlayer's first draw happens before the first decoded
+    // frame arrives, and a 0x0 texture at that draw leaves the canvas
+    // item without the RS dependency that triggers later redraws.
+    hap::core::HapTextureFormat fmt;
+    if (fourcc == hap::core::FCC_Hap1) {
+      fmt = hap::core::HapTextureFormat::RGB_DXT1;
+    } else if (fourcc == hap::core::FCC_Hap5) {
+      fmt = hap::core::HapTextureFormat::RGBA_DXT5;
+    } else {
+      fmt = hap::core::HapTextureFormat::RGBA_BPTC_UNORM; // Hap7
+    }
+    if (!create_bc_texture_ring(fmt, rs_color_texture_, rd_color_texture_)) {
+      return false;
+    }
+    bc_textures_created_ = true;
+    RID rd_tex = RenderingServer::get_singleton()->texture_get_rd_texture(
+        rs_color_texture_[ring_.current_slot()]);
+    if (rd_tex.is_valid()) {
+      display_texture_->set_texture_rd_rid(rd_tex);
+    }
   }
 
   initialized_ = true;
@@ -230,7 +256,10 @@ void GpuPresenter::cleanup() {
     alpha_image_[i] = Ref<Image>();
   }
 
-  display_texture_ = Ref<Texture2DRD>();
+  // Keep the display texture object itself (consumers hold a cached Ref
+  // to it); just detach it from the freed GPU resources.
+  if (display_texture_.is_valid())
+    display_texture_->set_texture_rd_rid(RID());
 
   shader_compiled_ = false;
   bc_textures_created_ = false;

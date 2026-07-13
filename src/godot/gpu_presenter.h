@@ -39,7 +39,7 @@ namespace godot {
 /// and reused across frames.
 class GpuPresenter {
 public:
-  GpuPresenter() = default;
+  GpuPresenter();
   ~GpuPresenter();
 
   // Non-copyable, non-movable.
@@ -63,6 +63,8 @@ public:
   bool present(const hap::core::DecodedFrame &frame);
 
   /// Returns the stable Texture2DRD that points to the current output.
+  /// Valid (same object) from construction on — consumers like the stock
+  /// VideoStreamPlayer cache it once, before the async open completes.
   Ref<Texture2DRD> get_texture() const { return display_texture_; }
 
   /// Returns true if the presenter has alpha support (HapM, Hap5).

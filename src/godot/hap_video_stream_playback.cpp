@@ -2,6 +2,9 @@
 
 #include "core/hap_frame.h"
 
+#include <chrono>
+#include <thread>
+
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/rendering_device.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
@@ -75,6 +78,21 @@ void HapVideoStreamPlayback::initialize_after_open() {
 
   playback_initialized_ = true;
   scheduler_.request_frame(current_frame_);
+}
+
+bool HapVideoStreamPlayback::wait_for_open() {
+  // The moov parse is milliseconds even for multi-gigabyte files; the
+  // bound only guards against a pathological stall (e.g. a dead network
+  // mount), turning it into a clean open failure instead of a hang.
+  constexpr int kMaxWaitMs = 30000;
+  for (int waited = 0; waited < kMaxWaitMs; waited++) {
+    if (open_failed_.load(std::memory_order_acquire))
+      return false;
+    if (open_ready_.load(std::memory_order_acquire))
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return false;
 }
 
 bool HapVideoStreamPlayback::poll_ready() {
