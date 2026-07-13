@@ -185,18 +185,20 @@ void GpuPresenter::cleanup() {
   if (!rd_)
     return;
 
-  // Free RD resources
-  for (int i = 0; i < RING_SIZE; i++) {
-    if (output_textures_[i].is_valid()) {
-      rd_->free_rid(output_textures_[i]);
-      output_textures_[i] = RID();
-    }
-  }
-
+  // Free RD resources. Uniform sets must go before the textures they
+  // reference: RD's dependency tracking frees a set automatically when a
+  // contained texture is freed, so the reverse order double-frees.
   for (int i = 0; i < RING_SIZE; i++) {
     if (uniform_sets_[i].is_valid()) {
       rd_->free_rid(uniform_sets_[i]);
       uniform_sets_[i] = RID();
+    }
+  }
+
+  for (int i = 0; i < RING_SIZE; i++) {
+    if (output_textures_[i].is_valid()) {
+      rd_->free_rid(output_textures_[i]);
+      output_textures_[i] = RID();
     }
   }
   if (pipeline_.is_valid()) {
@@ -408,12 +410,14 @@ bool GpuPresenter::create_output_textures() {
 bool GpuPresenter::create_uniform_set(int slot) {
   TypedArray<RDUniform> uniforms;
 
-  // Uniform 0: color texture (sampler with texture)
+  // Uniform 0: color texture (sampler with texture: sampler id first,
+  //            then texture id)
   {
     Ref<RDUniform> uniform;
     uniform.instantiate();
     uniform->set_uniform_type(RenderingDevice::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE);
     uniform->set_binding(0);
+    uniform->add_id(sampler_);
     uniform->add_id(rd_color_texture_[slot]);
     uniforms.push_back(uniform);
   }
@@ -425,6 +429,7 @@ bool GpuPresenter::create_uniform_set(int slot) {
     uniform.instantiate();
     uniform->set_uniform_type(RenderingDevice::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE);
     uniform->set_binding(1);
+    uniform->add_id(sampler_);
     uniform->add_id(rd_alpha_texture_[slot]);
     uniforms.push_back(uniform);
   }
@@ -467,12 +472,14 @@ bool GpuPresenter::dispatch_compute(int slot) {
   rd_->compute_list_bind_compute_pipeline(compute_list, pipeline_);
   rd_->compute_list_bind_uniform_set(compute_list, uniform_sets_[slot], 0);
 
-  // Push constant: has_alpha
+  // Push constant: has_alpha (one int32, padded to the 16-byte push
+  // constant size Vulkan rounds the block up to)
   PackedByteArray push_constant;
-  push_constant.resize(4); // one int32
+  push_constant.resize(16);
+  push_constant.fill(0);
   int32_t has_alpha_val = has_alpha_ ? 1 : 0;
   memcpy(push_constant.ptrw(), &has_alpha_val, 4);
-  rd_->compute_list_set_push_constant(compute_list, push_constant, 4);
+  rd_->compute_list_set_push_constant(compute_list, push_constant, 16);
 
   // Dispatch: ceil(width/8) x ceil(height/8) x 1
   uint32_t groups_x = (static_cast<uint32_t>(width_) + 7) / 8;
