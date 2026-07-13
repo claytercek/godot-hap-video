@@ -91,8 +91,8 @@ sources = Glob("build/src/godot/*.cpp") + Glob("build/src/core/*.cpp")
 # -----------------------------------------------------------------------
 # Shared library
 # -----------------------------------------------------------------------
-lib_filename = "{}{}{}{}".format(
-    env.subst("$SHLIBPREFIX"), libname, suffix, env.subst("$SHLIBSUFFIX"),
+lib_filename = "lib{}{}{}".format(
+    libname, suffix, env.subst("$SHLIBSUFFIX"),
 )
 
 library = env.SharedLibrary(
