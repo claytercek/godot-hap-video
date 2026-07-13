@@ -7,7 +7,6 @@
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/error_macros.hpp>
-#include <godot_cpp/variant/utility_functions.hpp>
 
 namespace godot {
 
@@ -214,23 +213,15 @@ Ref<Texture2D> HapVideoStreamPlayback::_get_texture() const {
 }
 
 void HapVideoStreamPlayback::_update(double p_delta) {
-  if (open_failed_.load(std::memory_order_acquire)) {
-    if (!open_error_logged_) {
+  if (!poll_ready()) {
+    // gpu_init_failed_ is already logged once, from inside
+    // initialize_after_open(); only the async-open failure needs its
+    // own once-only log here.
+    if (open_failed_.load(std::memory_order_acquire) && !open_error_logged_) {
       ERR_PRINT("HapVideo: " + String(open_error_.c_str()));
       open_error_logged_ = true;
     }
     return;
-  }
-
-  if (!open_ready_.load(std::memory_order_acquire))
-    return; // still opening asynchronously
-
-  if (!playback_initialized_) {
-    if (gpu_init_failed_)
-      return;
-    initialize_after_open();
-    if (!playback_initialized_)
-      return;
   }
 
   if (is_playing_ && !is_paused_) {

@@ -5,7 +5,6 @@
 #include <godot_cpp/classes/ref.hpp>
 #include <godot_cpp/classes/texture2drd.hpp>
 #include <godot_cpp/classes/video_stream_playback.hpp>
-#include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/string.hpp>
 
 #include "core/decode_scheduler.h"
