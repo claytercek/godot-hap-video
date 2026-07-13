@@ -15,6 +15,12 @@ addons/hap_video/
 # Custom build config
 custom.py
 
+# Fuzzer scratch state (regenerated locally by scripts/fuzz_demuxer.sh).
+# Curated crash/leak/oom finds that became regression tests live in
+# tests/fixtures/fuzz_regressions/ instead.
+tests/fuzz/corpus/
+tests/fuzz/crashes*/
+
 # Compile commands
 compile_commands.json
 
