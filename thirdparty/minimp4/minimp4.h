@@ -2864,7 +2864,12 @@ broken_android_meta_hack:
                     break;
                 sample_size = READ(4);
                 tr->sample_count = READ(4);
-                MALLOC(unsigned int*, tr->entry_size, tr->sample_count*4);
+                // (uint64_t) cast: sample_count*4 as native 32-bit
+                // arithmetic can itself overflow/wrap before reaching
+                // minimp4_bounded_malloc's size check, allocating far
+                // fewer bytes than the loop below then writes -- a
+                // fuzzer-found heap-buffer-overflow.
+                MALLOC(unsigned int*, tr->entry_size, (uint64_t)tr->sample_count*4);
                 for (i = 0; i < tr->sample_count; i++)
                 {
                     if (box_name == BOX_stsz)
@@ -2925,8 +2930,11 @@ broken_android_meta_hack:
                 count = READ(4);
                 ts_capacity = count;
 #if MP4D_TIMESTAMPS_SUPPORTED
-                MALLOC(unsigned int*, tr->timestamp, ts_capacity*4);
-                MALLOC(unsigned int*, tr->duration, ts_capacity*4);
+                // (uint64_t) cast: same native-arithmetic-overflow gap as
+                // BOX_stsz's entry_size MALLOC above, on this box's own
+                // unbounded, file-declared count.
+                MALLOC(unsigned int*, tr->timestamp, (uint64_t)ts_capacity*4);
+                MALLOC(unsigned int*, tr->duration, (uint64_t)ts_capacity*4);
                 tr->timestamp_count = 0;
 #endif
 
@@ -3241,7 +3249,14 @@ broken_android_meta_hack:
                 break;
             if (!tr->dsi && payload_bytes)
             {
-                MALLOC(unsigned char*, tr->dsi, (int)payload_bytes);
+                // (uint64_t) cast, not (int): truncating a large
+                // payload_bytes to int before minimp4_bounded_malloc's
+                // size check can produce a small (or, if negative,
+                // implementation-defined-but-typically-huge-when-
+                // reinterpreted-as-size_t) allocation while the write loop
+                // below still walks the untruncated payload_bytes count --
+                // a fuzzer-found heap-buffer-overflow.
+                MALLOC(unsigned char*, tr->dsi, (uint64_t)payload_bytes);
                 for (i = 0; i < payload_bytes; i++)
                 {
                     tr->dsi[i] = minimp4_read(mp4, 1, &eof_flag);    // These bytes available due to check above
@@ -3268,7 +3283,9 @@ broken_android_meta_hack:
 #else
             SKIP(4 + 4 + 4 + 4);
 #endif
-            MALLOC(unsigned char*, *ptag, (unsigned)payload_bytes + 1);
+            // (uint64_t) cast: same truncate-before-size-check gap as
+            // OD_DSI's dsi buffer above.
+            MALLOC(unsigned char*, *ptag, (uint64_t)payload_bytes + 1);
             for (i = 0; payload_bytes != 0; i++)
             {
                 (*ptag)[i] = READ(1);
