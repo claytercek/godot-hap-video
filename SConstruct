@@ -269,7 +269,12 @@ if ARGUMENTS.get("build_tests", "0") == "1":
         # Glob source as line ~95, but matching the compiled objects rather
         # than the .cpp sources, since $SHOBJSUFFIX is what SharedLibrary
         # actually produced them as (".os" on POSIX, ".obj" on MSVC).
-        core_objects = Glob("build/src/core/*" + env["SHOBJSUFFIX"])
+        # Must use test_env.Glob (not the bare global Glob), since on MSVC
+        # SHOBJSUFFIX is the literal unresolved string "$OBJSUFFIX" -- the
+        # global Glob() deliberately skips variable substitution, so it'd
+        # glob for a file literally named "*$OBJSUFFIX" and silently match
+        # nothing.
+        core_objects = test_env.Glob("build/src/core/*" + env["SHOBJSUFFIX"])
 
     test_targets = []
     for src in test_sources:

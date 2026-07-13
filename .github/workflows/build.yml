@@ -21,7 +21,7 @@ jobs:
           - { os: windows-latest,   name: windows, arch: x86_64 }
           - { os: windows-latest,   name: windows, arch: arm64 }
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.platform.os }}
     name: Build (${{ matrix.platform.name }}${{ matrix.platform.arch != '' && format('-{0}', matrix.platform.arch) || '' }}, ${{ matrix.target }})
 
     defaults:
