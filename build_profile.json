@@ -7,6 +7,7 @@
 		"ResourceFormatLoader",
 		"VideoStream",
 		"VideoStreamPlayback",
+		"Control",
 		"Texture2DRD",
 		"Texture2D",
 		"RenderingServer",

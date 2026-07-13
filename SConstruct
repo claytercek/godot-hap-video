@@ -88,6 +88,7 @@ sources = [
     "build/src/godot/hap_resource_format_loader.cpp",
     "build/src/godot/hap_texture_2d.cpp",
     "build/src/godot/gpu_presenter.cpp",
+    "build/src/godot/hap_player.cpp",
 ]
 
 # Core sources (currently empty, but directory structure is ready)

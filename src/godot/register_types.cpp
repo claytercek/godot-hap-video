@@ -1,5 +1,6 @@
 #include "register_types.h"
 
+#include "hap_player.h"
 #include "hap_resource_format_loader.h"
 #include "hap_texture_2d.h"
 #include "hap_video_stream.h"
@@ -25,6 +26,7 @@ void initialize_hap_video_module(ModuleInitializationLevel p_level) {
   ClassDB::register_class<HapTexture2D>();
   ClassDB::register_class<HapVideoStream>();
   ClassDB::register_class<HapVideoStreamPlayback>();
+  ClassDB::register_class<HapPlayer>();
 }
 
 void uninitialize_hap_video_module(ModuleInitializationLevel p_level) {
