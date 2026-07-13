@@ -7,7 +7,6 @@
 #include <godot_cpp/classes/rd_uniform.hpp>
 #include <godot_cpp/classes/rd_sampler_state.hpp>
 #include <godot_cpp/core/error_macros.hpp>
-#include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/variant/typed_array.hpp>
 
 #include <cstring>
@@ -17,15 +16,40 @@ namespace godot {
 // -----------------------------------------------------------------------
 // Embedded compute shader source (GLSL)
 // -----------------------------------------------------------------------
+// YCoCg->RGB inverse transform compute shader for Hap Q / Hap Q Alpha.
+//
+// Workgroup: 8x8
+// Input:  BC3 (DXT5) compressed color texture (YCoCg encoded)
+//         BC4 (RGTC1) alpha texture (HapM only, optional)
+// Output: RGBA8 storage image
+//
+// Channel mapping (from the NVIDIA whitepaper via the spec):
+//   R = Co, G = Cg, B = scale, A = Y
+//
+// YCoCg inverse transform:
+//   scale = 1.0 / (floor(s.b * 255.0 / 8.0 + 0.5) * (8.0 / 255.0) + 1.0)
+//   Co = (s.r - 128.0/255.0) * scale
+//   Cg = (s.g - 128.0/255.0) * scale
+//   Y  = s.a
+//   R = Y + Co - Cg
+//   G = Y + Cg
+//   B = Y - Co - Cg
+//   A = alpha (HapM) or 1.0
 const char *GpuPresenter::ycocg_shader_source_ = R"GLSL(
 #version 450
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
+// Input: BC3 color texture (YCoCg encoded, hardware-decompressed)
 layout(set = 0, binding = 0) uniform sampler2D u_color_tex;
+
+// Input: BC4 alpha texture (HapM only; sampled via R channel)
 layout(set = 0, binding = 1) uniform sampler2D u_alpha_tex;
+
+// Output: RGBA8 storage image
 layout(set = 0, binding = 2, rgba8) uniform writeonly image2D u_output_img;
 
+// Push constants: 0 = no alpha (HapY), 1 = has alpha (HapM)
 layout(push_constant) uniform PushConstants {
     int has_alpha;
 } u_constants;
@@ -33,10 +57,16 @@ layout(push_constant) uniform PushConstants {
 void main() {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(u_output_img);
-    if (pos.x >= size.x || pos.y >= size.y) return;
 
+    if (pos.x >= size.x || pos.y >= size.y) {
+        return;
+    }
+
+    // Sample the BC3 texture at exact texel coordinates (no filtering).
+    // texelFetch returns the decompressed BC3 texel value.
     vec4 s = texelFetch(u_color_tex, pos, 0);
 
+    // YCoCg inverse transform
     float scale = 1.0 / (floor(s.b * 255.0 / 8.0 + 0.5) * (8.0 / 255.0) + 1.0);
     float Co = (s.r - 128.0 / 255.0) * scale;
     float Cg = (s.g - 128.0 / 255.0) * scale;
@@ -46,10 +76,11 @@ void main() {
     float G = Y + Cg;
     float B = Y - Co - Cg;
 
+    // Alpha: from BC4 alpha texture (HapM) or 1.0
     float A = 1.0;
     if (u_constants.has_alpha != 0) {
         vec4 alpha_sample = texelFetch(u_alpha_tex, pos, 0);
-        A = alpha_sample.r;
+        A = alpha_sample.r; // BC4 is single-channel (R)
     }
 
     imageStore(u_output_img, pos, vec4(R, G, B, A));
@@ -93,90 +124,10 @@ RenderingDevice::DataFormat GpuPresenter::hap_format_to_rd(
 }
 
 // -----------------------------------------------------------------------
-// Constructor / Destructor / Move
+// Constructor / Destructor
 // -----------------------------------------------------------------------
 GpuPresenter::~GpuPresenter() {
   cleanup();
-}
-
-GpuPresenter::GpuPresenter(GpuPresenter &&other) noexcept
-    : rd_(other.rd_), initialized_(other.initialized_),
-      is_ycocg_(other.is_ycocg_), has_alpha_(other.has_alpha_),
-      width_(other.width_), height_(other.height_), ring_(other.ring_),
-      bc_textures_created_(other.bc_textures_created_),
-      sampler_(other.sampler_), shader_(other.shader_),
-      pipeline_(other.pipeline_), uniform_set_(other.uniform_set_),
-      shader_compiled_(other.shader_compiled_),
-      display_texture_(other.display_texture_) {
-  for (int i = 0; i < RING_SIZE; i++) {
-    rs_color_texture_[i] = other.rs_color_texture_[i];
-    rs_alpha_texture_[i] = other.rs_alpha_texture_[i];
-    rd_color_texture_[i] = other.rd_color_texture_[i];
-    rd_alpha_texture_[i] = other.rd_alpha_texture_[i];
-    output_textures_[i] = other.output_textures_[i];
-    color_image_[i] = other.color_image_[i];
-    alpha_image_[i] = other.alpha_image_[i];
-
-    other.rs_color_texture_[i] = RID();
-    other.rs_alpha_texture_[i] = RID();
-    other.rd_color_texture_[i] = RID();
-    other.rd_alpha_texture_[i] = RID();
-    other.output_textures_[i] = RID();
-    other.color_image_[i] = Ref<Image>();
-    other.alpha_image_[i] = Ref<Image>();
-  }
-  other.rd_ = nullptr;
-  other.initialized_ = false;
-  other.bc_textures_created_ = false;
-  other.sampler_ = RID();
-  other.shader_ = RID();
-  other.pipeline_ = RID();
-  other.uniform_set_ = RID();
-}
-
-GpuPresenter &GpuPresenter::operator=(GpuPresenter &&other) noexcept {
-  if (this != &other) {
-    cleanup();
-    rd_ = other.rd_;
-    initialized_ = other.initialized_;
-    is_ycocg_ = other.is_ycocg_;
-    has_alpha_ = other.has_alpha_;
-    width_ = other.width_;
-    height_ = other.height_;
-    ring_ = other.ring_;
-    bc_textures_created_ = other.bc_textures_created_;
-    sampler_ = other.sampler_;
-    shader_ = other.shader_;
-    pipeline_ = other.pipeline_;
-    uniform_set_ = other.uniform_set_;
-    shader_compiled_ = other.shader_compiled_;
-    display_texture_ = other.display_texture_;
-    for (int i = 0; i < RING_SIZE; i++) {
-      rs_color_texture_[i] = other.rs_color_texture_[i];
-      rs_alpha_texture_[i] = other.rs_alpha_texture_[i];
-      rd_color_texture_[i] = other.rd_color_texture_[i];
-      rd_alpha_texture_[i] = other.rd_alpha_texture_[i];
-      output_textures_[i] = other.output_textures_[i];
-      color_image_[i] = other.color_image_[i];
-      alpha_image_[i] = other.alpha_image_[i];
-
-      other.rs_color_texture_[i] = RID();
-      other.rs_alpha_texture_[i] = RID();
-      other.rd_color_texture_[i] = RID();
-      other.rd_alpha_texture_[i] = RID();
-      other.output_textures_[i] = RID();
-      other.color_image_[i] = Ref<Image>();
-      other.alpha_image_[i] = Ref<Image>();
-    }
-    other.rd_ = nullptr;
-    other.initialized_ = false;
-    other.bc_textures_created_ = false;
-    other.sampler_ = RID();
-    other.shader_ = RID();
-    other.pipeline_ = RID();
-    other.uniform_set_ = RID();
-  }
-  return *this;
 }
 
 // -----------------------------------------------------------------------
@@ -242,9 +193,11 @@ void GpuPresenter::cleanup() {
     }
   }
 
-  if (uniform_set_.is_valid()) {
-    rd_->free_rid(uniform_set_);
-    uniform_set_ = RID();
+  for (int i = 0; i < RING_SIZE; i++) {
+    if (uniform_sets_[i].is_valid()) {
+      rd_->free_rid(uniform_sets_[i]);
+      uniform_sets_[i] = RID();
+    }
   }
   if (pipeline_.is_valid()) {
     rd_->free_rid(pipeline_);
@@ -449,15 +402,10 @@ bool GpuPresenter::create_output_textures() {
 }
 
 // -----------------------------------------------------------------------
-// Update uniform set for a given ring slot
+// Create uniform set for a given ring slot (called once, at BC-ring
+// creation time; the slot's inputs never change afterward)
 // -----------------------------------------------------------------------
-bool GpuPresenter::update_uniform_set(int slot) {
-  // Free old uniform set
-  if (uniform_set_.is_valid()) {
-    rd_->free_rid(uniform_set_);
-    uniform_set_ = RID();
-  }
-
+bool GpuPresenter::create_uniform_set(int slot) {
   TypedArray<RDUniform> uniforms;
 
   // Uniform 0: color texture (sampler with texture)
@@ -491,8 +439,8 @@ bool GpuPresenter::update_uniform_set(int slot) {
     uniforms.push_back(uniform);
   }
 
-  uniform_set_ = rd_->uniform_set_create(uniforms, shader_, 0);
-  if (!uniform_set_.is_valid()) {
+  uniform_sets_[slot] = rd_->uniform_set_create(uniforms, shader_, 0);
+  if (!uniform_sets_[slot].is_valid()) {
     ERR_PRINT("HapGpuPresenter: Failed to create uniform set");
     return false;
   }
@@ -509,10 +457,6 @@ bool GpuPresenter::dispatch_compute(int slot) {
     return false;
   }
 
-  if (!update_uniform_set(slot)) {
-    return false;
-  }
-
   // Begin compute list
   int64_t compute_list = rd_->compute_list_begin();
   if (compute_list < 0) {
@@ -521,7 +465,7 @@ bool GpuPresenter::dispatch_compute(int slot) {
   }
 
   rd_->compute_list_bind_compute_pipeline(compute_list, pipeline_);
-  rd_->compute_list_bind_uniform_set(compute_list, uniform_set_, 0);
+  rd_->compute_list_bind_uniform_set(compute_list, uniform_sets_[slot], 0);
 
   // Push constant: has_alpha
   PackedByteArray push_constant;
@@ -580,6 +524,17 @@ bool GpuPresenter::present(const hap::core::DecodedFrame &frame) {
         return false;
       }
       bc_textures_created_ = true;
+
+      // The alpha ring is always created above in the YCoCg path, so
+      // every input a uniform set binds (rd_color_texture_[i],
+      // rd_alpha_texture_[i], output_textures_[i], sampler_) already
+      // exists for every slot; create all RING_SIZE uniform sets once
+      // instead of per-dispatch.
+      for (int i = 0; i < RING_SIZE; i++) {
+        if (!create_uniform_set(i)) {
+          return false;
+        }
+      }
     }
 
     if (!update_bc_texture(rs_color_texture_[slot], color_image_[slot],
@@ -605,13 +560,11 @@ bool GpuPresenter::present(const hap::core::DecodedFrame &frame) {
     // --- Pass-through path ---
 
     if (!bc_textures_created_) {
-      hap::core::HapTextureFormat dummy_fmt = hap::core::HapTextureFormat::A_RGTC1;
       if (!create_bc_texture_ring(tex0.format, rs_color_texture_,
                                   rd_color_texture_)) {
         return false;
       }
       // Alpha ring unused in the pass-through path; leave empty.
-      (void)dummy_fmt;
       bc_textures_created_ = true;
     }
 

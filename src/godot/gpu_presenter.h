@@ -42,12 +42,12 @@ public:
   GpuPresenter() = default;
   ~GpuPresenter();
 
-  // Non-copyable, movable.
+  // Non-copyable, non-movable.
   GpuPresenter(const GpuPresenter &) = delete;
   GpuPresenter &operator=(const GpuPresenter &) = delete;
 
-  GpuPresenter(GpuPresenter &&other) noexcept;
-  GpuPresenter &operator=(GpuPresenter &&other) noexcept;
+  GpuPresenter(GpuPresenter &&) = delete;
+  GpuPresenter &operator=(GpuPresenter &&) = delete;
 
   /// Initialize GPU resources for the given format and dimensions.
   /// Returns true on success.
@@ -101,7 +101,11 @@ private:
   // Compute shader resources (YCoCg only)
   RID shader_;
   RID pipeline_;
-  RID uniform_set_;
+  // Pre-created once (per ring slot) when the BC ring is created; the
+  // inputs a slot's uniform set binds (rd_color_texture_[slot],
+  // rd_alpha_texture_[slot], output_textures_[slot], sampler_) never
+  // change afterward, so there's no need to free/recreate per dispatch.
+  RID uniform_sets_[RING_SIZE];
   bool shader_compiled_ = false;
 
   // Output ring (RGBA8 storage textures, YCoCg only), indexed by ring_.
@@ -134,8 +138,9 @@ private:
   /// Create the output storage textures (ring).
   bool create_output_textures();
 
-  /// Update the uniform set with the RD textures for `slot`.
-  bool update_uniform_set(int slot);
+  /// Create the uniform set with the RD textures for `slot`. Called once
+  /// per slot when the BC ring is created.
+  bool create_uniform_set(int slot);
 
   /// Dispatch the compute shader, reading ring slot `slot`, writing
   /// output ring slot `slot`.
