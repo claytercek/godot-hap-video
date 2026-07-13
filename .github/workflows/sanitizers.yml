@@ -21,101 +21,47 @@ jobs:
   asan_ubsan:
     runs-on: ubuntu-latest
 
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            clang \
-            scons \
-            pkg-config \
-            libx11-dev \
-            libxcursor-dev \
-            libxinerama-dev \
-            libgl1-mesa-dev \
-            libxrandr-dev \
-            libxi-dev \
-            libxkbcommon-dev
+      - uses: ./.github/actions/setup-deps
+        with:
+          compiler: clang
 
       - name: Build (ASan+UBSan)
         run: scons build_tests=1 sanitize=asan_ubsan use_llvm=yes target=template_debug
-        shell: bash
 
-      - name: Run demuxer tests
-        run: build/tests/test_demuxer
-        shell: bash
-        env:
-          ASAN_OPTIONS: detect_leaks=1
-
-      - name: Run decoder tests
-        run: build/tests/test_decoder
-        shell: bash
-        env:
-          ASAN_OPTIONS: detect_leaks=1
-
-      - name: Run concurrency tests
-        run: build/tests/test_concurrency
-        shell: bash
-        env:
-          ASAN_OPTIONS: detect_leaks=1
-
-      - name: Run scheduler tests
-        run: build/tests/test_scheduler
-        shell: bash
-        env:
-          ASAN_OPTIONS: detect_leaks=1
-
-      - name: Run fuzz regression tests
-        run: build/tests/test_fuzz_regressions
-        shell: bash
+      - name: Run core tests (ASan+UBSan)
+        run: scripts/run_core_tests.sh test_demuxer test_decoder test_concurrency test_scheduler test_fuzz_regressions
         env:
           ASAN_OPTIONS: detect_leaks=1
 
   tsan:
     runs-on: ubuntu-latest
 
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            clang \
-            scons \
-            pkg-config \
-            libx11-dev \
-            libxcursor-dev \
-            libxinerama-dev \
-            libgl1-mesa-dev \
-            libxrandr-dev \
-            libxi-dev \
-            libxkbcommon-dev
+      - uses: ./.github/actions/setup-deps
+        with:
+          compiler: clang
 
       - name: Build (TSan)
         run: scons build_tests=1 sanitize=tsan use_llvm=yes target=template_debug
-        shell: bash
 
-      - name: Run concurrency tests
-        run: build/tests/test_concurrency
-        shell: bash
-        env:
-          TSAN_OPTIONS: halt_on_error=1
-
-      - name: Run scheduler tests
-        run: build/tests/test_scheduler
-        shell: bash
-        env:
-          TSAN_OPTIONS: halt_on_error=1
-
-      - name: Run decoder tests
-        run: build/tests/test_decoder
-        shell: bash
+      - name: Run core tests (TSan)
+        run: scripts/run_core_tests.sh test_concurrency test_scheduler test_decoder
         env:
           TSAN_OPTIONS: halt_on_error=1
