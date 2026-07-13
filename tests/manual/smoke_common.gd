@@ -19,12 +19,14 @@ static func make_player(tree: SceneTree) -> HapPlayer:
 ## Returns whether the signal fired. Must be called (with `await`) after the
 ## caller has connected its own signal handlers and assigned player.stream.
 static func wait_for_opened(tree: SceneTree, player: HapPlayer, max_frames: int = 120) -> bool:
-	var opened := false
-	var on_opened := func(): opened = true
+	# Boxed in an array: GDScript lambdas capture locals by value, so a
+	# plain `opened = true` inside the handler would never be observed here.
+	var opened := [false]
+	var on_opened := func(): opened[0] = true
 	player.connect("opened", on_opened)
 	for i in range(max_frames):
 		await tree.process_frame
-		if opened:
+		if opened[0]:
 			break
 	player.disconnect("opened", on_opened)
-	return opened
+	return opened[0]
