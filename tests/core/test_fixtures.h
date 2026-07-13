@@ -9,10 +9,9 @@
 #ifndef HAP_CORE_TEST_FIXTURES_H
 #define HAP_CORE_TEST_FIXTURES_H
 
+#include <filesystem>
 #include <string>
 #include <vector>
-
-#include <unistd.h>
 
 namespace hap {
 namespace test {
@@ -29,7 +28,7 @@ inline const std::vector<std::string> &fixture_search_dirs() {
 }
 
 inline bool fixture_path_exists(const std::string &path) {
-  return access(path.c_str(), F_OK) == 0;
+  return std::filesystem::exists(path);
 }
 
 // Resolve a single fixture file by name (e.g. "hap1.mov"). Returns the

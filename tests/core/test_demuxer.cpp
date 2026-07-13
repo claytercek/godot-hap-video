@@ -16,11 +16,12 @@
 #include "test.h"
 #include "test_fixtures.h"
 
+#include <atomic>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
-#include <unistd.h>
 
 using namespace hap::core;
 
@@ -55,17 +56,16 @@ OpenedFixture open_fixture(const std::string &filename) {
 // Helper: create a temp file from a buffer
 // -----------------------------------------------------------------------
 static std::string create_temp_file(const std::vector<uint8_t> &data) {
-  char tmpl[1024];
-  snprintf(tmpl, sizeof(tmpl), "%s/hap_test_XXXXXX",
-           std::getenv("TMPDIR") ?: "/tmp");
-  int fd = mkstemp(tmpl);
-  if (fd < 0) {
-    perror("mkstemp");
+  static std::atomic<int> counter{0};
+  std::filesystem::path path =
+      std::filesystem::temp_directory_path() /
+      ("hap_test_" + std::to_string(counter.fetch_add(1)) + ".tmp");
+  std::ofstream out(path, std::ios::binary);
+  if (!out)
     return "";
-  }
-  [[maybe_unused]] ssize_t written = write(fd, data.data(), data.size());
-  close(fd);
-  return std::string(tmpl);
+  out.write(reinterpret_cast<const char *>(data.data()), data.size());
+  out.close();
+  return path.string();
 }
 
 // -----------------------------------------------------------------------
@@ -178,7 +178,7 @@ HAP_TEST(test_mmap_reader_open_close) {
   HAP_ASSERT(reader.data() == nullptr);
   HAP_ASSERT_EQ(reader.size(), 0u);
 
-  unlink(path.c_str());
+  std::filesystem::remove(path);
 }
 
 HAP_TEST(test_mmap_reader_nonexistent) {

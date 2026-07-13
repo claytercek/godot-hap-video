@@ -16,11 +16,9 @@
 #include "test_fixtures.h"
 
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
-#include <dirent.h>
+#include <filesystem>
 #include <string>
-#include <unistd.h>
 #include <vector>
 
 using namespace hap::core;
@@ -47,21 +45,13 @@ HAP_TEST(test_fuzz_regressions) {
     return;
   }
 
-  DIR *dir = opendir(dir_path.c_str());
-  HAP_ASSERT(dir != nullptr);
-  if (!dir)
-    return;
-
   int replayed = 0;
-  struct dirent *entry;
-  while ((entry = readdir(dir)) != nullptr) {
-    std::string name = entry->d_name;
-    if (name == "." || name == "..")
+  for (const auto &entry : std::filesystem::directory_iterator(dir_path)) {
+    if (!entry.is_regular_file())
       continue;
-    replay(dir_path + "/" + name);
+    replay(entry.path().string());
     replayed++;
   }
-  closedir(dir);
 
   // Guard against a typo'd path silently turning this into a no-op test.
   HAP_ASSERT(replayed > 0);
