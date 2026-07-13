@@ -262,11 +262,11 @@ HAP_TEST(test_demuxer_with_fixture) {
   Demuxer demuxer;
   auto result = demuxer.open(reader);
   HAP_ASSERT(result.valid);
-  HAP_ASSERT(result.track.fourcc == FCC_Hap1);
-  HAP_ASSERT(result.track.width > 0);
-  HAP_ASSERT(result.track.height > 0);
-  HAP_ASSERT(result.track.frame_count > 0);
-  HAP_ASSERT(result.track.frame_rate > 0.0);
+  HAP_ASSERT(demuxer.track_info().fourcc == FCC_Hap1);
+  HAP_ASSERT(demuxer.track_info().width > 0);
+  HAP_ASSERT(demuxer.track_info().height > 0);
+  HAP_ASSERT(demuxer.track_info().frame_count > 0);
+  HAP_ASSERT(demuxer.track_info().frame_rate > 0.0);
 }
 
 HAP_TEST(test_demuxer_with_hap5_fixture) {
@@ -294,10 +294,10 @@ HAP_TEST(test_demuxer_with_hap5_fixture) {
   Demuxer demuxer;
   auto result = demuxer.open(reader);
   HAP_ASSERT(result.valid);
-  HAP_ASSERT(result.track.fourcc == FCC_Hap5);
-  HAP_ASSERT(result.track.width > 0);
-  HAP_ASSERT(result.track.height > 0);
-  HAP_ASSERT(result.track.frame_count > 0);
+  HAP_ASSERT(demuxer.track_info().fourcc == FCC_Hap5);
+  HAP_ASSERT(demuxer.track_info().width > 0);
+  HAP_ASSERT(demuxer.track_info().height > 0);
+  HAP_ASSERT(demuxer.track_info().frame_count > 0);
 }
 
 HAP_TEST(test_demuxer_with_hap7_fixture) {
@@ -325,12 +325,12 @@ HAP_TEST(test_demuxer_with_hap7_fixture) {
   Demuxer demuxer;
   auto result = demuxer.open(reader);
   HAP_ASSERT(result.valid);
-  HAP_ASSERT(result.track.fourcc == FCC_Hap7);
-  HAP_ASSERT(result.track.width > 0);
-  HAP_ASSERT(result.track.height > 0);
-  HAP_ASSERT(result.track.frame_count > 0);
+  HAP_ASSERT(demuxer.track_info().fourcc == FCC_Hap7);
+  HAP_ASSERT(demuxer.track_info().width > 0);
+  HAP_ASSERT(demuxer.track_info().height > 0);
+  HAP_ASSERT(demuxer.track_info().frame_count > 0);
   fprintf(stderr, "OK (demuxed Hap7: %ux%u, %u frames) ",
-          result.track.width, result.track.height, result.track.frame_count);
+          demuxer.track_info().width, demuxer.track_info().height, demuxer.track_info().frame_count);
 }
 
 HAP_TEST(test_demuxer_audio_skip) {
@@ -361,10 +361,10 @@ HAP_TEST(test_demuxer_audio_skip) {
   
   // Assert: demuxer finds and returns the video track despite audio track presence
   HAP_ASSERT(result.valid);
-  HAP_ASSERT(result.track.fourcc == FCC_Hap1);
-  HAP_ASSERT(result.track.width > 0);
-  HAP_ASSERT(result.track.height > 0);
-  HAP_ASSERT(result.track.frame_count > 0);
+  HAP_ASSERT(demuxer.track_info().fourcc == FCC_Hap1);
+  HAP_ASSERT(demuxer.track_info().width > 0);
+  HAP_ASSERT(demuxer.track_info().height > 0);
+  HAP_ASSERT(demuxer.track_info().frame_count > 0);
 }
 
 // -----------------------------------------------------------------------
@@ -408,6 +408,24 @@ HAP_TEST(test_validate_samples_handles_offset_and_size_summing_past_4gb) {
   std::string error;
   HAP_ASSERT(!Demuxer::validate_samples(samples, kFourGb, error));
   HAP_ASSERT(Demuxer::validate_samples(samples, kFourGb + 100, error));
+}
+
+// -----------------------------------------------------------------------
+// block_size() regression: switch cases use FCC_*.value (well-defined),
+// not multi-char char literals (implementation-defined). Verify each
+// supported FourCC maps to its documented block size.
+// -----------------------------------------------------------------------
+HAP_TEST(test_block_size_per_fourcc) {
+  auto block_size_for = [](FourCC fourcc) {
+    VideoTrackInfo info;
+    info.fourcc = fourcc;
+    return info.block_size();
+  };
+  HAP_ASSERT_EQ(block_size_for(FCC_Hap1), 8u);
+  HAP_ASSERT_EQ(block_size_for(FCC_Hap5), 16u);
+  HAP_ASSERT_EQ(block_size_for(FCC_HapY), 16u);
+  HAP_ASSERT_EQ(block_size_for(FCC_HapM), 16u);
+  HAP_ASSERT_EQ(block_size_for(FCC_Hap7), 16u);
 }
 
 // -----------------------------------------------------------------------

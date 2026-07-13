@@ -17,13 +17,6 @@ enum class HapTextureFormat : uint32_t {
   RGBA_BPTC_UNORM = 0x8E8C,
 };
 
-/// Hap compressor types used in chunk decode instructions.
-enum class HapCompressorType : uint8_t {
-  None = 0xA,
-  Snappy = 0xB,
-  Complex = 0xC,
-};
-
 /// Decoded texture data for one texture in a frame.
 struct DecodedTexture {
   std::vector<uint8_t> data;
@@ -103,11 +96,11 @@ struct VideoTrackInfo {
   /// Block size for this format's compressed texture data.
   uint32_t block_size() const {
     switch (fourcc.value) {
-    case 'Hap1': return 8;  // BC1: 8 bytes per 4x4 block
-    case 'Hap5': return 16; // BC3: 16 bytes per 4x4 block
-    case 'HapY': return 16; // YCoCg-DXT5: same as BC3
-    case 'HapM': return 16; // Dual-texture, color is BC3
-    case 'Hap7': return 16; // BC7: 16 bytes per 4x4 block
+    case FCC_Hap1.value: return 8;  // BC1: 8 bytes per 4x4 block
+    case FCC_Hap5.value: return 16; // BC3: 16 bytes per 4x4 block
+    case FCC_HapY.value: return 16; // YCoCg-DXT5: same as BC3
+    case FCC_HapM.value: return 16; // Dual-texture, color is BC3
+    case FCC_Hap7.value: return 16; // BC7: 16 bytes per 4x4 block
     default: return 8;
     }
   }
@@ -126,11 +119,10 @@ struct SampleEntry {
   uint32_t size = 0;
 };
 
-/// Result of opening/demuxing a Hap video file.
+/// Result of opening/demuxing a Hap video file. On success, read the parsed
+/// track and sample cache via Demuxer::track_info() / Demuxer::samples().
 struct DemuxResult {
   bool valid = false;
-  VideoTrackInfo track;
-  std::vector<SampleEntry> samples; // Frame offset/size cache
   std::string error_message;
 };
 

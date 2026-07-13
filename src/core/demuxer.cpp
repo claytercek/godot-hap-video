@@ -116,6 +116,20 @@ static bool walk_children(const uint8_t *file_data, uint64_t file_size,
   return false;
 }
 
+// Find the first direct child of `parent` whose type matches `fourcc`.
+static bool find_child(const uint8_t *file_data, uint64_t file_size,
+                       const BoxHeader &parent, uint32_t fourcc,
+                       BoxHeader &out_child) {
+  return walk_children(file_data, file_size, parent,
+                       [&](const BoxHeader &child) -> bool {
+                         if (child.type == fourcc) {
+                           out_child = child;
+                           return true;
+                         }
+                         return false;
+                       });
+}
+
 static bool find_trak_at(const uint8_t *file_data, uint64_t file_size,
                          const BoxHeader &moov, unsigned int track_index,
                          BoxHeader &out_trak) {
@@ -135,47 +149,21 @@ static bool find_trak_at(const uint8_t *file_data, uint64_t file_size,
 
 static bool find_stsd_in_trak(const uint8_t *file_data, uint64_t file_size,
                               const BoxHeader &trak, BoxHeader &out_stsd) {
-  BoxHeader mdia;
-  if (!walk_children(file_data, file_size, trak,
-                     [&](const BoxHeader &child) -> bool {
-                       if (child.type == FourCC('m','d','i','a').value) {
-                         mdia = child;
-                         return true;
-                       }
-                       return false;
-                     }))
-    return false;
-
-  BoxHeader minf;
-  if (!walk_children(file_data, file_size, mdia,
-                     [&](const BoxHeader &child) -> bool {
-                       if (child.type == FourCC('m','i','n','f').value) {
-                         minf = child;
-                         return true;
-                       }
-                       return false;
-                     }))
-    return false;
-
-  BoxHeader stbl;
-  if (!walk_children(file_data, file_size, minf,
-                     [&](const BoxHeader &child) -> bool {
-                       if (child.type == FourCC('s','t','b','l').value) {
-                         stbl = child;
-                         return true;
-                       }
-                       return false;
-                     }))
-    return false;
-
-  return walk_children(file_data, file_size, stbl,
-                       [&](const BoxHeader &child) -> bool {
-                         if (child.type == FourCC('s','t','s','d').value) {
-                           out_stsd = child;
-                           return true;
-                         }
-                         return false;
-                       });
+  const uint32_t path[] = {
+      FourCC('m', 'd', 'i', 'a').value,
+      FourCC('m', 'i', 'n', 'f').value,
+      FourCC('s', 't', 'b', 'l').value,
+      FourCC('s', 't', 's', 'd').value,
+  };
+  BoxHeader current = trak;
+  for (uint32_t fourcc : path) {
+    BoxHeader child;
+    if (!find_child(file_data, file_size, current, fourcc, child))
+      return false;
+    current = child;
+  }
+  out_stsd = current;
+  return true;
 }
 
 // -----------------------------------------------------------------------
@@ -316,26 +304,22 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
     return result;
   }
 
-  // Find the moov box in the raw file by scanning top-level boxes
+  // Find the moov box in the raw file by scanning top-level boxes. A
+  // synthetic whole-file "parent" (data starting at offset 0) lets the
+  // same walk_children/find_child machinery scan the file's top level.
   const uint8_t *file_data = reader.data();
   uint64_t file_size = reader.size();
 
+  BoxHeader whole_file;
+  whole_file.offset = 0;
+  whole_file.size = file_size;
+  whole_file.type = 0;
+  whole_file.data_pos = 0;
+  whole_file.data_size = static_cast<uint32_t>(file_size);
+
   BoxHeader moov;
-  uint64_t pos = 0;
-  bool found_moov = false;
-  while (pos + 8 <= file_size) {
-    BoxHeader hdr;
-    if (!read_box_header(file_data, file_size, pos, hdr))
-      break;
-    if (hdr.type == FourCC('m','o','o','v').value) {
-      moov = hdr;
-      found_moov = true;
-      break;
-    }
-    pos += hdr.size;
-    if (pos >= file_size)
-      break;
-  }
+  bool found_moov = find_child(file_data, file_size, whole_file,
+                               FourCC('m', 'o', 'o', 'v').value, moov);
 
   if (!found_moov) {
     result.error_message = "No moov box found in MOV file";
@@ -409,7 +393,9 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
     return result;
   }
 
-  // Cache all sample offsets/sizes
+  // Cache all sample offsets/sizes, capturing the first sample's duration
+  // for the frame-rate computation below.
+  unsigned int first_sample_duration = 0;
   samples_.reserve(num_samples);
   for (uint32_t i = 0; i < num_samples; i++) {
     unsigned int frame_bytes = 0;
@@ -417,6 +403,9 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
     unsigned int duration = 0;
     MP4D_file_offset_t offset = MP4D_frame_offset(
         mp4_.get(), hap_track_index, i, &frame_bytes, &timestamp, &duration);
+
+    if (i == 0)
+      first_sample_duration = duration;
 
     SampleEntry entry;
     entry.offset = static_cast<uint64_t>(offset);
@@ -439,24 +428,14 @@ DemuxResult Demuxer::open(const MmapReader &reader) {
   track_.frame_count = num_samples;
   track_.timescale = mp4_track.timescale;
 
-  // Compute frame rate from first sample's duration
-  if (num_samples > 0) {
-    unsigned int frame_bytes = 0;
-    unsigned int timestamp = 0;
-    unsigned int duration = 0;
-    MP4D_frame_offset(mp4_.get(), hap_track_index, 0, &frame_bytes, &timestamp,
-                      &duration);
-    if (duration > 0 && mp4_track.timescale > 0) {
-      track_.frame_rate =
-          static_cast<double>(mp4_track.timescale) /
-          static_cast<double>(duration);
-    }
+  // Compute frame rate from the first sample's duration (captured above).
+  if (first_sample_duration > 0 && mp4_track.timescale > 0) {
+    track_.frame_rate = static_cast<double>(mp4_track.timescale) /
+                        static_cast<double>(first_sample_duration);
   }
 
   valid_ = true;
   result.valid = true;
-  result.track = track_;
-  result.samples = samples_;
   return result;
 }
 
