@@ -53,7 +53,8 @@ pub const Job = struct {
 };
 
 /// Per-stream job queue and "is something running for this stream"
-/// latch. Guarded by OuterThreadPool.mutex.
+/// latch. Guarded by OuterThreadPool.mutex. An entry exists only while
+/// its stream has queued or running work; it is removed once drained.
 const StreamState = struct {
     pending: std.DoublyLinkedList = .{},
     active: bool = false,
@@ -207,7 +208,9 @@ pub const OuterThreadPool = struct {
             const j: *Job = @fieldParentPtr("node", node);
             self.enqueueReadyLocked(j);
         } else {
-            st.active = false;
+            // Drained: drop the map entry, or a long-lived pool accumulates
+            // one entry per stream id ever used (ids are never reused).
+            _ = self.streams.remove(stream_id);
             self.cv.notifyAll();
         }
     }
@@ -329,6 +332,26 @@ test "OuterThreadPool.waitForStreamIdle returns once a stream drains" {
     pool.submitForStream(42, Ctx.run, .{&ran});
     pool.waitForStreamIdle(42);
     try testing.expect(ran.load(.acquire));
+}
+
+test "OuterThreadPool removes drained stream entries" {
+    const pool = try OuterThreadPool.create(testing.allocator, 2);
+    defer pool.destroy();
+
+    var ran = std.atomic.Value(bool).init(false);
+    const Ctx = struct {
+        fn run(flag: *std.atomic.Value(bool)) void {
+            flag.store(true, .release);
+        }
+    };
+    pool.submitForStream(7, Ctx.run, .{&ran});
+    pool.waitForStreamIdle(7);
+    try testing.expect(ran.load(.acquire));
+
+    pool.mutex.lock();
+    const count = pool.streams.count();
+    pool.mutex.unlock();
+    try testing.expectEqual(@as(u32, 0), count);
 }
 
 // The per-stream serialization invariant, cross-stream concurrency, and
