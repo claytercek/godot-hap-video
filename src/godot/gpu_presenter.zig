@@ -125,6 +125,14 @@ const RingSlot = struct {
     // avoid two slots fighting over one Image).
     color_image: ?*Image = null,
     alpha_image: ?*Image = null,
+
+    // Reusable staging buffers for updateBcTexture's per-frame upload (to
+    // avoid allocating/freeing a PackedByteArray every texture every frame).
+    // Keyed per-ring-slot rather than shared: by the time a slot is reused,
+    // ring depth 3 guarantees its buffer's COW refcount is back to 1, so
+    // resize() below is a true in-place reuse with no fork.
+    color_staging: ?PackedByteArray = null,
+    alpha_staging: ?PackedByteArray = null,
 };
 
 /// Manages GPU resources for presenting decoded Hap frames. See the module
@@ -286,6 +294,14 @@ pub const GpuPresenter = struct {
                 ref.releaseEngineRef(img);
                 slot.alpha_image = null;
             }
+            if (slot.color_staging) |*b| {
+                b.deinit();
+                slot.color_staging = null;
+            }
+            if (slot.alpha_staging) |*b| {
+                b.deinit();
+                slot.alpha_staging = null;
+            }
         }
 
         // Keep the display texture object itself (consumers hold a cached
@@ -340,11 +356,11 @@ pub const GpuPresenter = struct {
                 }
             }
 
-            self.updateBcTexture(s.rs_color_texture, &s.color_image, self.color_format, tex0.data.items);
+            self.updateBcTexture(s.rs_color_texture, &s.color_image, &s.color_staging, self.color_format, tex0.data.items);
 
             if (self.has_alpha and frame.textures.items.len > 1) {
                 const tex1 = &frame.textures.items[1];
-                self.updateBcTexture(s.rs_alpha_texture, &s.alpha_image, self.alpha_format, tex1.data.items);
+                self.updateBcTexture(s.rs_alpha_texture, &s.alpha_image, &s.alpha_staging, self.alpha_format, tex1.data.items);
             }
 
             if (!self.dispatchCompute(slot)) return false;
@@ -353,7 +369,7 @@ pub const GpuPresenter = struct {
         } else {
             // --- Pass-through path ---
 
-            self.updateBcTexture(s.rs_color_texture, &s.color_image, self.color_format, tex0.data.items);
+            self.updateBcTexture(s.rs_color_texture, &s.color_image, &s.color_staging, self.color_format, tex0.data.items);
 
             // createBcTextureRing (run eagerly at initialize()) already cached
             // this slot's validated RD texture; wrap it directly rather than
@@ -456,10 +472,12 @@ pub const GpuPresenter = struct {
         return true;
     }
 
-    /// Update one ring slot's RS texture with decoded BC data.
-    fn updateBcTexture(self: *GpuPresenter, rs_tex: Rid, image_slot: *?*Image, img_fmt: Image.Format, data: []const u8) void {
-        var img_data = PackedByteArray.init();
-        defer img_data.deinit();
+    /// Update one ring slot's RS texture with decoded BC data. Reuses a
+    /// persistent per-slot staging `PackedByteArray` instead of allocating a
+    /// fresh one every call: resize() grows/shrinks it in place.
+    fn updateBcTexture(self: *GpuPresenter, rs_tex: Rid, image_slot: *?*Image, staging_slot: *?PackedByteArray, img_fmt: Image.Format, data: []const u8) void {
+        if (staging_slot.* == null) staging_slot.* = PackedByteArray.init();
+        const img_data = &staging_slot.*.?;
         _ = img_data.resize(@intCast(data.len));
         if (data.len > 0) {
             const dst: [*]u8 = @ptrCast(img_data.index(0));
@@ -470,7 +488,7 @@ pub const GpuPresenter = struct {
             image_slot.* = Image.init();
         }
         const image = image_slot.*.?;
-        image.setData(self.width, self.height, false, img_fmt, img_data);
+        image.setData(self.width, self.height, false, img_fmt, img_data.*);
 
         RenderingServer.texture2dUpdate(rs_tex, image, 0);
     }
