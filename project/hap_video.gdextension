@@ -1,0 +1,12 @@
+[configuration]
+entry_symbol = "hap_video_init"
+compatibility_minimum = "4.6"
+reloadable = false
+
+[libraries]
+macos.debug = "lib/libhap_video.dylib"
+macos.release = "lib/libhap_video.dylib"
+linux.debug = "lib/libhap_video.so"
+linux.release = "lib/libhap_video.so"
+windows.debug = "lib/hap_video.dll"
+windows.release = "lib/hap_video.dll"

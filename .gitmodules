@@ -1,3 +1,4 @@
-[submodule "godot-cpp"]
-	path = godot-cpp
-	url = https://github.com/godotengine/godot-cpp.git
+[submodule "vendor/gdzig"]
+	path = vendor/gdzig
+	url = https://github.com/claytercek/gdzig.git
+	branch = media-streams-fixes-0.16

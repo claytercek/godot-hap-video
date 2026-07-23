@@ -1,214 +1,216 @@
-# Hap Video GDExtension
+# Hap Video for Godot
 
-Hap video playback for Godot 4.4+. Plays Hap-encoded QuickTime/MOV files
-with GPU-native decoding: frames are BC-compressed textures, so playback
-is a Snappy decompress plus a texture upload — fast enough for multiple
-simultaneous 4K@60 layers, instant seeking, and reverse playback. Built
-for interactive installations and live visuals.
+Play Hap-encoded QuickTime (`.mov`) video in Godot 4. The extension decodes
+Hap frames, uploads their GPU-compressed texture data, and exposes them through
+Godot's `VideoStreamPlayer` or a `HapPlayer` node for direct control.
 
-Two integration layers over one shared decode core:
+## Install and play a video
 
-1. **Drop-in** — `.mov` files load as a `VideoStream` and play in the
-   stock `VideoStreamPlayer` node. Zero new concepts.
-2. **Power-user** — a `HapPlayer` node with playback rate, reverse,
-   frame-stepping, loop signals, and metadata.
-
-## Requirements
-
-- Godot **4.4+**
-- **Forward+ or Mobile** renderer (the extension uses `RenderingDevice`;
-  the Compatibility/OpenGL renderer is not supported)
-- Windows (x86_64), macOS (universal), or Linux (x86_64)
-
-## Installation
-
-1. Download the addon zip from the [latest release](../../releases/latest)
-   (or build from source, below).
-2. Unzip it at your project root so the files land in
+1. Download `hap-video-<tag>.zip` from the [latest release](../../releases/latest).
+2. Extract it at your Godot project's root so its contents land in
    `addons/hap_video/`.
-3. Restart the editor. That's it — GDExtensions load automatically; there
-   is nothing to enable in Project Settings.
+3. Restart the editor. Godot loads the GDExtension automatically.
 
-The addon is self-contained: prebuilt debug and release binaries for all
-three platforms, the `.gdextension` manifest, and all license files.
+The release archive contains the manifest, debug and release libraries for the
+supported platforms, this README, and the required license notices.
 
-## Supported variants
-
-| Variant | FourCC | Texture format | GPU work |
-|---|---|---|---|
-| Hap | `Hap1` | BC1 (DXT1) | pass-through |
-| Hap Alpha | `Hap5` | BC3 (DXT5) | pass-through |
-| Hap Q | `HapY` | YCoCg BC3 | YCoCg→RGB compute |
-| Hap Q Alpha | `HapM` | YCoCg BC3 + BC4 alpha | YCoCg + alpha combine |
-| Hap R | `Hap7` | BC7 (BPTC) | pass-through |
-
-Chunked files (TouchDesigner, ffmpeg `-chunks`, AVF Batch Exporter)
-decode multithreaded. Files with an audio track play their video; the
-audio is skipped cleanly (see Limitations). Every variant — including
-Hap Q Alpha's dual-texture layout — presents as a single `Texture2DRD`,
-so alpha variants composite through the standard 2D alpha blend.
-
-## Usage
-
-### Layer 1: drop-in (`VideoStreamPlayer`)
-
-Any `.mov` path resolves to a Hap video stream automatically — assign it
-to a stock `VideoStreamPlayer` in the editor, or from code:
+Put a Hap `.mov` file in the project and assign it to a normal
+`VideoStreamPlayer`. The extension registers a loader for `.mov` files:
 
 ```gdscript
 var player := VideoStreamPlayer.new()
 add_child(player)
-player.stream = load("res://videos/clip.mov")
+player.stream = load("res://videos/loop.mov")
 player.play()
 ```
 
-This layer covers what `VideoStreamPlayer` itself supports: play, stop,
-pause, seek, loop, forward 1× playback. Errors are reported via the
-engine log (the stock player has no error signals to consume).
+This route uses the controls provided by `VideoStreamPlayer`, including play,
+pause, stop, seeking, and looping. Opening is synchronous here because the
+stock node needs the display texture before its first draw.
 
-### Layer 2: `HapPlayer`
+## Use `HapPlayer` for direct control
 
-`HapPlayer` is a `Control` node with the full control surface. It draws
-its video like any other control, and exposes the texture for custom
-materials.
+`HapPlayer` is a `Control` that opens its stream asynchronously. Use it for
+frame stepping, reverse playback, lifecycle signals, or the texture for your
+own material. Wait for `opened` before reading metadata or starting playback.
 
 ```gdscript
 var hap := HapPlayer.new()
 add_child(hap)
 
 var stream := HapVideoStream.new()
-stream.file = "user://shows/loop_4k.mov"
+stream.file = "res://videos/loop.mov"
 hap.stream = stream
 
-hap.opened.connect(func ():
-    print("%dx%d @ %.2f fps, %d frames, %.2f s" % [
-        hap.width, hap.height, hap.frame_rate,
-        hap.frame_count, hap.duration,
-    ])
-    hap.play()
+hap.opened.connect(func():
+	print("%d frames at %.2f fps" % [hap.frame_count, hap.frame_rate])
+	hap.play()
+)
+hap.error_occurred.connect(func(message):
+	push_error(message)
 )
 ```
 
-**Properties**
+`HapVideoStream.file` accepts a Godot path such as `res://` or `user://`,
+or an absolute filesystem path. The extension resolves it before memory-mapping
+the file. For large media, keep it outside the exported PCK and reference it
+through `user://` or an absolute path.
 
-| Property | Type | Default | Notes |
-|---|---|---|---|
-| `stream` | `HapVideoStream` | — | The video to play; opening is asynchronous, wait for `opened` |
-| `loop` | `bool` | `false` | Emits `playback_looped` at each wrap |
-| `playback_speed` | `float` | `1.0` | Any float; **negative plays in reverse** |
-| `autoplay` | `bool` | `false` | Play as soon as the stream opens |
-| `stream_position` | `float` | `0.0` | Get/set; setting seeks (scrub-safe, latest seek wins) |
-| `paused` | `bool` | `false` | Freezes the pump in place, texture retained |
+### `HapPlayer` reference
 
-Read-only metadata, valid after `opened` fires: `frame_rate`, `width`,
-`height`, `duration`, `frame_count`.
+| Property | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `stream` | `HapVideoStream` | `null` | Stream to open. Assigning one starts an asynchronous open. |
+| `loop` | `bool` | `false` | Wrap when playback reaches an end. |
+| `playback_speed` | `float` | `1.0` | Playback rate. A negative value plays backwards. |
+| `autoplay` | `bool` | `false` | Start playing after the stream opens. |
+| `stream_position` | `float` | `0.0` | Current position in seconds. Setting it seeks. |
+| `paused` | `bool` | `false` | Pause without discarding the current texture. |
+| `frame_rate`, `width`, `height`, `duration`, `frame_count` | read-only | `0` before open | Track metadata, valid after `opened`. |
 
-**Methods**
+Methods:
 
-- `play()` — starts/resumes from the current `stream_position`, in the
-  direction implied by the sign of `playback_speed`. Does not reset
-  position.
-- `pause()` / `stop()` — `stop()` also resets `stream_position` to 0.
-- `step_frame(n: int)` — steps exactly `n` frames (negative allowed);
-  auto-pauses if playing.
-- `get_texture() -> Texture2D` — the stable per-stream `Texture2DRD`;
-  feed it to your own materials for custom rendering.
+- `play()` starts or resumes from the current position.
+- `pause()` freezes playback and retains the texture.
+- `stop()` stops playback and resets the position to zero.
+- `step_frame(n: int)` pauses if needed, then moves exactly `n` frames.
+  `n` may be negative.
+- `get_texture() -> Texture2D` returns the current display texture.
 
-**Signals**
+Signals:
 
-- `opened()` — metadata is valid, playback may start.
-- `playback_completed()` — reached the end (non-looping).
-- `playback_looped()` — wrapped around (looping).
-- `error_occurred(message: String)` — open failed or the file is
-  unsupported.
+- `opened()` fires when metadata and the display texture are ready.
+- `playback_completed()` fires at an end when `loop` is false.
+- `playback_looped()` fires each time looping wraps.
+- `error_occurred(message: String)` fires once when opening or GPU setup
+  fails.
 
-Multiple videos need no special API: each `HapPlayer` owns its own
-playback and all players share one bounded decode worker pool.
+## Requirements and releases
 
-## Large files: keep them out of the PCK
+Godot **4.6 or later** is required by the shipped manifest. Use the Forward+
+or Mobile renderer. The Compatibility/OpenGL renderer has no
+`RenderingDevice`, so it cannot present Hap textures.
 
-Reference large videos by **absolute path or `user://` path**, not
-`res://`, and don't pack gigabyte videos into the PCK. The loader
-accepts all three path forms and the demuxer memory-maps the file
-either way, but PCK-packed videos bloat exports and defeat the
-memory-mapped zero-copy read path. Files over 4 GB are supported.
+Each release includes debug and release binaries selected automatically by
+Godot's export mode:
 
-```gdscript
-stream.file = "user://content/act2_background.mov"   # good
-stream.file = "/media/show-drive/act2_background.mov" # good
-```
+| Platform | Architectures | Libraries |
+| --- | --- | --- |
+| macOS | universal arm64 + x86_64 | `libhap_video.macos.debug.dylib`, `libhap_video.macos.release.dylib` |
+| Linux | x86_64, arm64 | `libhap_video.linux.{debug,release}.{x86_64,arm64}.so` |
+| Windows | x86_64, arm64 | `hap_video.windows.{debug,release}.{x86_64,arm64}.dll` |
 
-## Performance tuning
+The release workflow builds those targets. The regular CI smoke test runs on
+macOS; the other release targets are cross-compiled in CI.
 
-Playback is designed for multiple simultaneous 4K@60 streams. Three
-knobs matter if you push it hard:
+## Supported content
 
-1. **Staging buffer size** — set
-   `rendering/rendering_device/staging_buffer/max_size_mb` to **256**
-   in Project Settings for multi-stream 4K. The default 128 MB is
-   shared by every texture upload each frame; four 4K Hap Q Alpha
-   streams upload ≈ 50 MB/frame, and overflowing the staging buffer
-   triggers a full-device flush-and-stall.
-2. **Upload region size** —
-   `rendering/rendering_device/staging_buffer/texture_upload_region_size_px`
-   (default 64) is a profiling lever. Texture uploads are tiled into
-   regions and the CPU cost scales with region count (~2,000 memcpys
-   per 4K frame at the default). If you see render-thread CPU saturation
-   under multi-stream 4K, profile with larger values; there is no
-   universal recommended setting.
-3. **Decode worker split** — a shared pool of **3 outer workers**
-   decodes streams (one stream per worker at a time); the remaining
-   hardware threads parallelize chunk decode within a frame. If many
-   simultaneous streams starve the outer pool, raise
-   `OuterThreadPool::kDefaultWorkers` (`src/core/outer_thread_pool.h`)
-   and rebuild — the trade-off is less chunk-level parallelism per
-   stream. This is a compile-time constant, not a runtime setting.
+The loader recognizes `.mov` files and selects a Hap video track from the
+MOV container.
 
-## Limitations
+| Variant | FourCC | Presentation |
+| --- | --- | --- |
+| Hap | `Hap1` | BC1/DXT1 texture upload |
+| Hap Alpha | `Hap5` | BC3/DXT5 texture upload with alpha |
+| Hap Q | `HapY` | YCoCg BC3 converted to RGBA by a compute shader |
+| Hap Q Alpha | `HapM` | YCoCg plus BC4 alpha, converted to RGBA by a compute shader |
+| Hap R | `Hap7` | BC7/BPTC texture upload |
 
-- **Video-only.** Audio tracks in the container are skipped cleanly and
-  never played; the extension reports a silent stream.
-- **HapA (alpha-only) and Hap HDR (BC6) are not supported.** Files in
-  these variants fail to open with a clear error rather than
-  misrendering.
-- **Forward+ and Mobile renderers only.** The Compatibility (OpenGL)
-  renderer has no `RenderingDevice` and is not supported.
-- **Single-precision Godot builds only.** Double-precision
-  (`precision=double`) builds are not provided or tested.
-- **No performance guarantees.** The multi-4K@60 target shaped the
-  architecture, but there is no minimum hardware spec or benchmark
-  gate; below high-end hardware, throughput is best-effort.
+Chunked Hap frames are supported. The demuxer can validate sample offsets
+beyond 4 GB, and files are read through a memory map.
 
-## Building from source
+## Architecture
+
+The Godot-facing layer registers `HapVideoStream`, a `.mov` resource loader,
+and `HapPlayer`. Both playback surfaces use the same Godot-independent core.
+That core memory-maps the MOV file, parses its track and sample table with
+minimp4, and decodes Hap sections with the vendored Hap and Snappy libraries.
+
+Decode work runs on one bounded process-wide outer worker pool, not one worker
+per video. A stream's jobs stay serial, while different streams can run on
+different pool workers. Chunk decoding uses the remaining hardware threads.
+The presenter keeps a three-texture retirement ring so a new upload does not
+overwrite a texture still in the render queue.
+
+Hap1, Hap5, and Hap7 use GPU-compressed uploads. HapY and HapM upload their
+compressed inputs, then run a YCoCg-to-RGBA compute pass. `get_texture()`
+returns the stable `Texture2DRD` wrapper used for presentation.
+
+## Limitations and diagnostics
+
+- This is video-only. An audio track in a MOV file is skipped while the Hap
+  video track is used.
+- HapA and Hap HDR are rejected. Supported FourCCs are `Hap1`, `Hap5`,
+  `HapY`, `HapM`, and `Hap7`.
+- The Compatibility/OpenGL renderer and headless presentation are not
+  supported because both lack a `RenderingDevice`.
+- No shipped double-precision Godot library variant is declared in the addon
+  manifest.
+- `VideoStreamPlayer` exposes failures through Godot's log. With
+  `HapPlayer`, handle `error_occurred(message)` to report an open or
+  presenter failure in your game.
+
+For high-throughput scenes, profile on the target hardware. The default outer
+decode pool has three workers; changing `kDefaultWorkers` in
+`src/core/outer_thread_pool.zig` requires rebuilding and trades stream-level
+parallelism against chunk-level parallelism.
+
+## Build from source
+
+Clone the repository with its submodules, because `vendor/gdzig` is a required
+local dependency:
 
 ```bash
-git clone --recursive <repo>
+git clone --recurse-submodules <repository-url>
 cd godot-hap-video
-
-scons target=template_debug    # editor/debug binary
-scons target=template_release  # release binary
 ```
 
-Binaries, the `.gdextension` manifest, and bundled licenses are
-assembled into `addons/hap_video/` for the host platform. Headless core
-tests build with `scons build_tests=1 target=template_debug` and run via
-`scripts/run_core_tests.sh`.
+Use **Zig 0.16.0**. The core test suite does not need Godot:
 
-## Dependencies
+```bash
+zig build test
+```
 
-| Library | Purpose | License |
-|---|---|---|
-| [Vidvox hap](https://github.com/vidvox/hap) | Hap frame decode | BSD-2-Clause |
-| [Google snappy](https://github.com/google/snappy) | Snappy decompression | BSD-3-Clause |
-| [minimp4](https://github.com/lieff/minimp4) | MOV/MP4 demux | CC0 |
-| [godot-cpp](https://github.com/godotengine/godot-cpp) | GDExtension bindings | MIT |
+Building the extension needs a Godot executable for GDExtension binding
+generation. By default, the build asks gdzig for Godot 4.6. Supply a local
+executable when needed:
 
-hap, snappy, and minimp4 are vendored under `thirdparty/` (see
-`thirdparty/README.md` for versions and local patches); godot-cpp is a
-submodule pinned to `godot-4.4.1-stable`.
+```bash
+zig build -Dgodot-path=/path/to/godot
+# or
+GODOT_PATH=/path/to/godot zig build
+```
+
+The development build installs the library into `project/lib/` and uses
+`project/hap_video.gdextension`, which is separate from the release addon
+manifest. Useful commands:
+
+```bash
+zig build                         # build the development extension
+zig build run                     # build, then run the development demo
+zig build smoke                   # build, then open and present the bundled fixture
+zig build test -Dtest-optimize=Debug # core tests with Zig runtime safety checks
+zig build test -Dsanitize-c=full  # core tests with C/C++ UBSan
+```
+
+`zig build run -- <args>` forwards `<args>` to Godot. `zig build smoke`
+checks that the extension can open the bundled Hap fixture, present a frame,
+expose metadata, seek, and preserve playback after a rejected replacement. It
+requires a RenderingDevice.
+
+## Project layout
+
+| Path | Contents |
+| --- | --- |
+| `addon/` | Release GDExtension manifest. |
+| `project/` | Development demo, smoke scene, fixture MOV, and development manifest. |
+| `src/core/` | Godot-independent MOV demuxing, Hap decode, scheduling, and tests. |
+| `src/godot/` | GDExtension classes, resource loader, playback adapter, and GPU presenter. |
+| `thirdparty/` | Vendored Hap, minimp4, and Snappy sources and their license notices. |
+| `vendor/gdzig/` | Pinned GDExtension binding dependency. |
+| `tests/fixtures/` | Media fixtures and notes about their provenance. |
 
 ## License
 
-MIT — see [LICENSE.md](LICENSE.md). Vendored dependencies carry their
-own licenses, shipped both in `thirdparty/licenses/` and inside the
-addon at `addons/hap_video/licenses/`.
+This project is licensed under the [MIT License](LICENSE.md). The release
+archive also includes the license notices for Hap, minimp4, Snappy, and gdzig.

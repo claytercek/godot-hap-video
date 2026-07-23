@@ -1,0 +1,23 @@
+name: Download Godot
+description: >
+  Downloads a Godot Linux binary and points GODOT_PATH at it. This avoids
+  repeated bindgen downloads in Linux matrix jobs; build.zig can also
+  download its configured Godot version when GODOT_PATH is unset.
+
+inputs:
+  version:
+    description: Godot release tag to download (e.g. 4.6.3-stable)
+    required: false
+    default: 4.6.3-stable
+
+runs:
+  using: composite
+  steps:
+    - name: Download Godot (for headers/bindgen)
+      shell: bash
+      run: |
+        curl -fsSL -o godot.zip \
+          https://github.com/godotengine/godot/releases/download/${{ inputs.version }}/Godot_v${{ inputs.version }}_linux.x86_64.zip
+        unzip -q godot.zip
+        chmod +x Godot_v${{ inputs.version }}_linux.x86_64
+        echo "GODOT_PATH=$PWD/Godot_v${{ inputs.version }}_linux.x86_64" >> "$GITHUB_ENV"
