@@ -199,14 +199,21 @@ fn initializeAfterOpen(self: *HapVideoStreamPlayback) void {
 /// texture when the stream is set and expects it to already have its real
 /// size, so that path needs synchronous-open semantics. HapPlayer never
 /// calls this. Returns whether the open succeeded.
+///
+/// The moov parse is milliseconds even for multi-gigabyte files; the bound
+/// only guards against a pathological stall (e.g. a dead network mount),
+/// turning it into a clean open failure instead of hanging the main thread.
 pub fn waitForOpen(self: *HapVideoStreamPlayback) bool {
-    while (true) {
+    const max_wait_ms = 30000;
+    var waited: u32 = 0;
+    while (waited < max_wait_ms) : (waited += 1) {
         switch (self.scheduler.openStatus()) {
             .not_started, .failed => return false,
             .open => return true,
             .opening => sleepOneMs(),
         }
     }
+    return false;
 }
 
 /// Sleep for one millisecond (best-effort; errors are ignored). Zig 0.16
