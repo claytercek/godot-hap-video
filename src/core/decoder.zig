@@ -85,102 +85,91 @@ fn clearOutput(output: *DecodedFrame, allocator: std.mem.Allocator) void {
     output.textures.clearRetainingCapacity();
 }
 
-/// Decodes a single Hap frame from its compressed bytes into raw texture
-/// data. See module docs for the multi-texture fix and chunked-decode
-/// dispatch through the shared InnerThreadPool.
-pub const Decoder = struct {
-    /// Temporary output buffer for the decoded texture data. Reused across
-    /// decode() calls to avoid reallocation.
-    temp_buffer: std.ArrayListUnmanaged(u8) = .empty,
+/// Decode a single Hap frame. See module docs for the multi-texture fix and
+/// chunked-decode dispatch through the shared InnerThreadPool.
+///
+/// `input` is the compressed frame data (e.g. a slice of the mmap
+/// region). `output` receives the decoded textures; any textures it
+/// already holds are freed first. On success, `output` holds the newly
+/// decoded textures. Returns `error.InvalidFrame` if `input` is not a
+/// valid/supported Hap frame; on any error, `output` is left empty
+/// (never partially populated from a mid-loop error).
+pub fn decode(allocator: std.mem.Allocator, input: []const u8, output: *DecodedFrame) error{ InvalidFrame, OutOfMemory }!void {
+    clearOutput(output, allocator);
 
-    pub fn deinit(self: *Decoder, allocator: std.mem.Allocator) void {
-        self.temp_buffer.deinit(allocator);
+    // Also empty `output` on error paths (e.g. allocation failure),
+    // not just on `false` returns -- callers shouldn't have to
+    // distinguish "rejected frame" from "ran out of memory" to know
+    // whether output is trustworthy.
+    errdefer clearOutput(output, allocator);
+
+    // Determine number of textures in this frame.
+    var texture_count: c_uint = 0;
+    var result = HapGetFrameTextureCount(input.ptr, @intCast(input.len), &texture_count);
+    if (result != HapResult_No_Error or texture_count == 0 or texture_count > max_texture_count) {
+        return error.InvalidFrame;
     }
 
-    /// Decode a single Hap frame.
-    ///
-    /// `input` is the compressed frame data (e.g. a slice of the mmap
-    /// region). `output` receives the decoded textures; any textures it
-    /// already holds are freed first. On success, `output` holds the newly
-    /// decoded textures. Returns `error.InvalidFrame` if `input` is not a
-    /// valid/supported Hap frame; on any error, `output` is left empty
-    /// (never partially populated from a mid-loop error).
-    pub fn decode(self: *Decoder, allocator: std.mem.Allocator, input: []const u8, output: *DecodedFrame) error{ InvalidFrame, OutOfMemory }!void {
-        clearOutput(output, allocator);
+    try output.textures.resize(allocator, texture_count);
+    for (output.textures.items) |*tex| tex.* = .{};
 
-        // Also empty `output` on error paths (e.g. allocation failure),
-        // not just on `false` returns -- callers shouldn't have to
-        // distinguish "rejected frame" from "ran out of memory" to know
-        // whether output is trustworthy.
-        errdefer clearOutput(output, allocator);
-
-        // Determine number of textures in this frame.
-        var texture_count: c_uint = 0;
-        var result = HapGetFrameTextureCount(input.ptr, @intCast(input.len), &texture_count);
-        if (result != HapResult_No_Error or texture_count == 0 or texture_count > max_texture_count) {
+    var i: c_uint = 0;
+    while (i < texture_count) : (i += 1) {
+        // Peek at the texture format to determine the output buffer
+        // size. Multi-texture fix: pass `i`, not a hardcoded 0.
+        var texture_format: c_uint = 0;
+        result = HapGetFrameTextureFormat(input.ptr, @intCast(input.len), i, &texture_format);
+        if (result != HapResult_No_Error) {
             return error.InvalidFrame;
         }
 
-        try output.textures.resize(allocator, texture_count);
-        for (output.textures.items) |*tex| tex.* = .{};
+        const tex = &output.textures.items[@intCast(i)];
 
-        var i: c_uint = 0;
-        while (i < texture_count) : (i += 1) {
-            // Peek at the texture format to determine the output buffer
-            // size. Multi-texture fix: pass `i`, not a hardcoded 0.
-            var texture_format: c_uint = 0;
-            result = HapGetFrameTextureFormat(input.ptr, @intCast(input.len), i, &texture_format);
-            if (result != HapResult_No_Error) {
-                return error.InvalidFrame;
-            }
-
-            // Allocate a generous output buffer. We grow it as needed. The
-            // maximum size for BC-compressed data is the full input size
-            // (uncompressed worst case). For safety, use input_size *
-            // buffer_growth_factor.
-            var max_size: usize = @intFromFloat(@as(f64, @floatFromInt(input.len)) * buffer_growth_factor);
-            if (max_size < min_output_buffer_bytes) max_size = min_output_buffer_bytes;
-            if (self.temp_buffer.items.len < max_size) {
-                try self.temp_buffer.resize(allocator, max_size);
-            }
-
-            // Decode into temp_buffer. If it's too small, hap.c reports the
-            // exact bytes needed via bytes_used; grow to 1.5x that and
-            // retry once.
-            var bytes_used: c_ulong = 0;
-            var decoded = false;
-            var attempt: u32 = 0;
-            while (attempt < 2) : (attempt += 1) {
-                result = HapDecode(
-                    input.ptr,
-                    @intCast(input.len),
-                    i,
-                    thread_pool.hapInnerDecodeCallback,
-                    null,
-                    self.temp_buffer.items.ptr,
-                    @intCast(self.temp_buffer.items.len),
-                    &bytes_used,
-                    &texture_format,
-                );
-                if (result == HapResult_No_Error) {
-                    decoded = true;
-                    break;
-                }
-                if (result != HapResult_Buffer_Too_Small) {
-                    return error.InvalidFrame;
-                }
-                const grown: usize = @intFromFloat(@as(f64, @floatFromInt(bytes_used)) * buffer_growth_factor);
-                try self.temp_buffer.resize(allocator, grown);
-            }
-            if (!decoded) {
-                return error.InvalidFrame;
-            }
-
-            // Copy decoded data into the output.
-            const tex = &output.textures.items[@intCast(i)];
-            try tex.data.resize(allocator, bytes_used);
-            @memcpy(tex.data.items, self.temp_buffer.items[0..bytes_used]);
-            tex.format = @enumFromInt(texture_format);
+        // Allocate a generous output buffer. We grow it as needed. The
+        // maximum size for BC-compressed data is the full input size
+        // (uncompressed worst case). For safety, use input_size *
+        // buffer_growth_factor.
+        var max_size: usize = @intFromFloat(@as(f64, @floatFromInt(input.len)) * buffer_growth_factor);
+        if (max_size < min_output_buffer_bytes) max_size = min_output_buffer_bytes;
+        if (tex.data.items.len < max_size) {
+            try tex.data.resize(allocator, max_size);
         }
+
+        // Decode directly into tex.data. If it's too small, hap.c
+        // reports the exact bytes needed via bytes_used; grow to 1.5x
+        // that and retry once.
+        var bytes_used: c_ulong = 0;
+        var decoded = false;
+        var attempt: u32 = 0;
+        while (attempt < 2) : (attempt += 1) {
+            result = HapDecode(
+                input.ptr,
+                @intCast(input.len),
+                i,
+                thread_pool.hapInnerDecodeCallback,
+                null,
+                tex.data.items.ptr,
+                @intCast(tex.data.items.len),
+                &bytes_used,
+                &texture_format,
+            );
+            if (result == HapResult_No_Error) {
+                decoded = true;
+                break;
+            }
+            if (result != HapResult_Buffer_Too_Small) {
+                return error.InvalidFrame;
+            }
+            const grown: usize = @intFromFloat(@as(f64, @floatFromInt(bytes_used)) * buffer_growth_factor);
+            try tex.data.resize(allocator, grown);
+        }
+        if (!decoded) {
+            return error.InvalidFrame;
+        }
+
+        // Shrink to the actual decoded size (no copy -- just truncates
+        // .items.len).
+        try tex.data.resize(allocator, bytes_used);
+        tex.format = @enumFromInt(texture_format);
     }
-};
+}

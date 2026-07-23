@@ -16,7 +16,6 @@ const demuxer = @import("demuxer.zig");
 const decoder = @import("decoder.zig");
 const test_support = @import("test_support.zig");
 
-const Decoder = decoder.Decoder;
 const DecodedFrame = hap_frame.DecodedFrame;
 const HapTextureFormat = hap_frame.HapTextureFormat;
 
@@ -56,9 +55,7 @@ fn decodeFixtureFrame0(allocator: std.mem.Allocator, path: []const u8, out: *Dec
 
     const sample = dem.sampleData(&reader, 0) orelse return error.TestUnexpectedResult;
 
-    var dec: Decoder = .{};
-    defer dec.deinit(allocator);
-    try dec.decode(allocator, sample, out);
+    try decoder.decode(allocator, sample, out);
 }
 
 // -----------------------------------------------------------------------
@@ -72,12 +69,10 @@ fn expectDecodesTo(type_byte: u8, bc_data: []const u8, expected_format: HapTextu
     const frame = try test_support.buildRawFrame(testing.allocator, bc_data, type_byte);
     defer testing.allocator.free(frame);
 
-    var dec: Decoder = .{};
-    defer dec.deinit(testing.allocator);
     var output: DecodedFrame = .{};
     defer output.deinit(testing.allocator);
 
-    try dec.decode(testing.allocator, frame, &output);
+    try decoder.decode(testing.allocator, frame, &output);
     try testing.expectEqual(@as(usize, 1), output.textures.items.len);
 
     const tex = output.textures.items[0];
@@ -114,12 +109,10 @@ test "decoder decodes multiple Hap1 BC1 blocks (2x2 grid)" {
     const frame = try test_support.buildRawFrame(testing.allocator, &bc1_blocks, 0xAB);
     defer testing.allocator.free(frame);
 
-    var dec: Decoder = .{};
-    defer dec.deinit(testing.allocator);
     var output: DecodedFrame = .{};
     defer output.deinit(testing.allocator);
 
-    try dec.decode(testing.allocator, frame, &output);
+    try decoder.decode(testing.allocator, frame, &output);
     try testing.expectEqual(@as(usize, 1), output.textures.items.len);
     try testing.expectEqual(@as(usize, 32), output.textures.items[0].data.items.len); // 4 blocks x 8 bytes
 }
@@ -278,12 +271,10 @@ test "decoder rejects a frame with an invalid type byte" {
     const frame = try test_support.buildRawFrame(testing.allocator, &dummy, 0x00);
     defer testing.allocator.free(frame);
 
-    var dec: Decoder = .{};
-    defer dec.deinit(testing.allocator);
     var output: DecodedFrame = .{};
     defer output.deinit(testing.allocator);
 
-    try testing.expectError(error.InvalidFrame, dec.decode(testing.allocator, frame, &output));
+    try testing.expectError(error.InvalidFrame, decoder.decode(testing.allocator, frame, &output));
     try testing.expectEqual(@as(usize, 0), output.textures.items.len);
 }
 
@@ -293,12 +284,10 @@ test "decoder rejects a frame with an unsupported compressor nibble" {
     const frame = try test_support.buildRawFrame(testing.allocator, &dummy, 0xD0);
     defer testing.allocator.free(frame);
 
-    var dec: Decoder = .{};
-    defer dec.deinit(testing.allocator);
     var output: DecodedFrame = .{};
     defer output.deinit(testing.allocator);
 
-    try testing.expectError(error.InvalidFrame, dec.decode(testing.allocator, frame, &output));
+    try testing.expectError(error.InvalidFrame, decoder.decode(testing.allocator, frame, &output));
     try testing.expectEqual(@as(usize, 0), output.textures.items.len);
 }
 
@@ -354,13 +343,53 @@ test "decoder leaves output empty when a later texture in a multi-image frame is
     try testing.expectEqual(decoder.HapResult_No_Error, cc_result);
     try testing.expectEqual(@as(c_uint, 2), tex_count);
 
-    var dec: Decoder = .{};
-    defer dec.deinit(testing.allocator);
     var output: DecodedFrame = .{};
     defer output.deinit(testing.allocator);
 
-    try testing.expectError(error.InvalidFrame, dec.decode(testing.allocator, frame, &output));
+    try testing.expectError(error.InvalidFrame, decoder.decode(testing.allocator, frame, &output));
     try testing.expectEqual(@as(usize, 0), output.textures.items.len);
+}
+
+test "decoder dual-texture (HapM-style) frame decodes each texture into its own non-aliased buffer" {
+    // Both sub-images are valid Hap1 (0xAB), but with different content, so
+    // a decode that accidentally aliased texture 0 and texture 1's output
+    // buffers (as the old shared temp_buffer did) would show up as
+    // texture 1's data getting clobbered by texture 0's, or vice versa.
+    const bc1_block_0 = [8]u8{
+        0x00, 0x00, // color0: RGB565 = 0 (black)
+        0xFF, 0xFF, // color1: RGB565 = 0xFFFF (white)
+        0x00, 0x00, 0x00, 0x00, // all indices = 0 (black)
+    };
+    const bc1_block_1 = [8]u8{
+        0x00, 0xF8, // color0: RGB565 = red
+        0x1F, 0x00, // color1: RGB565 = blue
+        0xFF, 0xFF, 0xFF, 0xFF, // all indices = 1
+    };
+    const sub0 = try test_support.buildRawFrame(testing.allocator, &bc1_block_0, 0xAB);
+    defer testing.allocator.free(sub0);
+    const sub1 = try test_support.buildRawFrame(testing.allocator, &bc1_block_1, 0xAB);
+    defer testing.allocator.free(sub1);
+
+    const frame = try buildMultiImageFrame(testing.allocator, &.{ sub0, sub1 });
+    defer testing.allocator.free(frame);
+
+    var tex_count: c_uint = 0;
+    const cc_result = decoder.HapGetFrameTextureCount(frame.ptr, @intCast(frame.len), &tex_count);
+    try testing.expectEqual(decoder.HapResult_No_Error, cc_result);
+    try testing.expectEqual(@as(c_uint, 2), tex_count);
+
+    var output: DecodedFrame = .{};
+    defer output.deinit(testing.allocator);
+
+    try decoder.decode(testing.allocator, frame, &output);
+    try testing.expectEqual(@as(usize, 2), output.textures.items.len);
+
+    // Each texture must be byte-identical to its own source block, and
+    // distinct from the other's -- proving they landed in independent
+    // buffers rather than a shared scratch that the second decode
+    // overwrote.
+    try testing.expectEqualSlices(u8, &bc1_block_0, output.textures.items[0].data.items);
+    try testing.expectEqualSlices(u8, &bc1_block_1, output.textures.items[1].data.items);
 }
 
 test "decoder leaves output empty on failure even when it held a prior successful decode" {
@@ -377,15 +406,13 @@ test "decoder leaves output empty on failure even when it held a prior successfu
     const bad_frame = try test_support.buildRawFrame(testing.allocator, &dummy, 0x00);
     defer testing.allocator.free(bad_frame);
 
-    var dec: Decoder = .{};
-    defer dec.deinit(testing.allocator);
     var output: DecodedFrame = .{};
     defer output.deinit(testing.allocator);
 
-    try dec.decode(testing.allocator, good_frame, &output);
+    try decoder.decode(testing.allocator, good_frame, &output);
     try testing.expectEqual(@as(usize, 1), output.textures.items.len);
 
-    try testing.expectError(error.InvalidFrame, dec.decode(testing.allocator, bad_frame, &output));
+    try testing.expectError(error.InvalidFrame, decoder.decode(testing.allocator, bad_frame, &output));
     try testing.expectEqual(@as(usize, 0), output.textures.items.len);
 }
 
@@ -414,12 +441,10 @@ fn expectFixtureDecodesToFormat(path: []const u8, expected_fourcc: hap_frame.Fou
 
     const sample = dem.sampleData(&reader, 0) orelse return error.TestUnexpectedResult;
 
-    var dec: Decoder = .{};
-    defer dec.deinit(testing.allocator);
     var output: DecodedFrame = .{};
     defer output.deinit(testing.allocator);
 
-    try dec.decode(testing.allocator, sample, &output);
+    try decoder.decode(testing.allocator, sample, &output);
     try testing.expectEqual(@as(usize, 1), output.textures.items.len);
 
     const tex = output.textures.items[0];
@@ -476,15 +501,13 @@ test "decoder chunked BC1 (Hap1) decode is byte-identical to unchunked" {
     try testing.expectEqual(decoder.HapResult_No_Error, cc_result);
     try testing.expectEqual(@as(c_int, 4), chunk_count);
 
-    var dec: Decoder = .{};
-    defer dec.deinit(testing.allocator);
     var out_unchunked: DecodedFrame = .{};
     defer out_unchunked.deinit(testing.allocator);
     var out_chunked: DecodedFrame = .{};
     defer out_chunked.deinit(testing.allocator);
 
-    try dec.decode(testing.allocator, unchunked, &out_unchunked);
-    try dec.decode(testing.allocator, chunked, &out_chunked);
+    try decoder.decode(testing.allocator, unchunked, &out_unchunked);
+    try decoder.decode(testing.allocator, chunked, &out_chunked);
 
     try testing.expectEqual(@as(usize, 1), out_unchunked.textures.items.len);
     try testing.expectEqual(@as(usize, 1), out_chunked.textures.items.len);
@@ -525,15 +548,13 @@ test "decoder chunked HapY (YCoCg-DXT5) decode is byte-identical to unchunked" {
     try testing.expectEqual(decoder.HapResult_No_Error, cc_result);
     try testing.expect(chunk_count >= 2);
 
-    var dec: Decoder = .{};
-    defer dec.deinit(testing.allocator);
     var out_unchunked: DecodedFrame = .{};
     defer out_unchunked.deinit(testing.allocator);
     var out_chunked: DecodedFrame = .{};
     defer out_chunked.deinit(testing.allocator);
 
-    try dec.decode(testing.allocator, unchunked, &out_unchunked);
-    try dec.decode(testing.allocator, chunked, &out_chunked);
+    try decoder.decode(testing.allocator, unchunked, &out_unchunked);
+    try decoder.decode(testing.allocator, chunked, &out_chunked);
 
     try testing.expectEqual(@as(usize, 1), out_unchunked.textures.items.len);
     try testing.expectEqual(@as(usize, 1), out_chunked.textures.items.len);
@@ -628,8 +649,11 @@ test "decoder Hap1 fixture frame0 matches the committed golden reference" {
 // decoding. There is no committed hapm.mov fixture (tests/fixtures/
 // README.md documents it as conditional/optional), so the multi-texture
 // cases above only assert HapGetFrameTextureCount == 1 for Hap1/5/7,
-// never exercising the count == 2 path. The multi-texture index fix
-// itself is preserved in decoder.zig's loop (see its doc comment); a
-// synthetic HapM round-trip test would need HapEncode's two-texture
-// (YCoCg_DXT5 + A_RGTC1) combination.
+// never exercising the count == 2 path against a real HapEncode-produced
+// HapM frame. The synthetic buildMultiImageFrame-based test above
+// ("dual-texture (HapM-style) frame decodes each texture into its own
+// non-aliased buffer") does exercise the count == 2 path and the
+// multi-texture index fix (decoder.zig's loop, see its doc comment) using
+// the same kHapSectionMultipleImages wrapping hap.c expects, just not with
+// HapEncode's real YCoCg_DXT5 + A_RGTC1 texture combination.
 // -----------------------------------------------------------------------
