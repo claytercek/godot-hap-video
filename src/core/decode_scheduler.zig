@@ -41,7 +41,7 @@
 //!     `std.mem.Allocator` (see demuxer.zig/decoder.zig); `DecodeScheduler`
 //!     stores the allocator it was constructed with and threads it through.
 //!
-//! `deinit` releases queue → decoder → demuxer → mmap after
+//! `deinit` releases queue → demuxer → mmap after
 //! `OuterThreadPool.waitForStreamIdle()` because a queued/in-flight fill
 //! step captures `self` and must never observe this object mid- or
 //! post-destruction.
@@ -59,7 +59,6 @@ const sync = @import("sync.zig");
 
 const MmapReader = mmap_reader.MmapReader;
 const Demuxer = demuxer_mod.Demuxer;
-const Decoder = decoder_mod.Decoder;
 const FrameQueue = frame_queue.FrameQueue;
 const VideoTrackInfo = hap_frame.VideoTrackInfo;
 const Mutex = sync.Mutex;
@@ -96,7 +95,6 @@ pub const DecodeScheduler = struct {
 
     mmap: MmapReader = .{},
     demuxer: Demuxer = .{},
-    decoder: Decoder = .{},
     queue: FrameQueue,
 
     stream_id: u64,
@@ -190,7 +188,7 @@ pub const DecodeScheduler = struct {
 
     /// Blocks until no fillStep/open job is queued or running for this
     /// stream on the shared OuterThreadPool, then releases owned
-    /// resources queue → decoder → demuxer → mmap (see module docs).
+    /// resources queue → demuxer → mmap (see module docs).
     pub fn deinit(self: *DecodeScheduler) void {
         self.mutex.lock();
         self.closing = true;
@@ -208,7 +206,6 @@ pub const DecodeScheduler = struct {
         outer_thread_pool.instance().waitForStreamIdle(self.stream_id);
 
         self.queue.deinit();
-        self.decoder.deinit(self.allocator);
         self.demuxer.deinit(self.allocator);
         self.mmap.deinit();
         if (self.open_path.len > 0) self.allocator.free(self.open_path);
@@ -389,7 +386,7 @@ pub const DecodeScheduler = struct {
             const frame_index_u32: u32 = @intCast(frame_index);
             if (self.demuxer.sampleData(&self.mmap, frame_index_u32)) |sample| {
                 if (self.queue.beginWrite(frame_index_u32)) |slot| {
-                    if (self.decoder.decode(self.allocator, sample, slot)) |_| {
+                    if (decoder_mod.decode(self.allocator, sample, slot)) |_| {
                         self.queue.commitWrite();
                         decoded_one = true;
                     } else |err| {
