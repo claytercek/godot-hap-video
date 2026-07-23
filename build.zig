@@ -11,7 +11,7 @@ const common_warn_flags = [_][]const u8{ "-Wall", "-Wextra", "-Wno-unused-parame
 // Wires up the vendored C/C++ (hap, minimp4, snappy) that core.zig wraps
 // with hand-written `extern fn` declarations, shared between the shipped
 // core module and the test-only one (see build()'s `core_test_mod`).
-fn addCoreCSources(b: *Build, mod: *Build.Module) void {
+fn addCoreCSources(b: *Build, mod: *Build.Module, target: Build.ResolvedTarget) void {
     mod.addIncludePath(b.path("thirdparty/hap"));
     mod.addIncludePath(b.path("thirdparty/minimp4"));
     mod.addIncludePath(b.path("thirdparty/snappy"));
@@ -26,6 +26,22 @@ fn addCoreCSources(b: *Build, mod: *Build.Module) void {
         .flags = &common_warn_flags,
     });
 
+    // Snappy has no runtime CPU dispatch: SSSE3/BMI2 decode is purely
+    // compile-time gated, so it must be paired with the matching codegen
+    // flag. Scoped to x86_64 only; aarch64 already gets NEON for free via
+    // __ARM_NEON.
+    const snappy_arch_flags: []const []const u8 = switch (target.result.cpu.arch) {
+        .x86_64 => &.{ "-mssse3", "-mbmi2" },
+        else => &.{},
+    };
+    var snappy_flags = std.ArrayList([]const u8).initCapacity(
+        b.allocator,
+        common_warn_flags.len + 2 + snappy_arch_flags.len,
+    ) catch @panic("OOM");
+    snappy_flags.appendSliceAssumeCapacity(&common_warn_flags);
+    snappy_flags.appendSliceAssumeCapacity(&.{ "-std=c++17", "-DHAVE_CONFIG_H=1" });
+    snappy_flags.appendSliceAssumeCapacity(snappy_arch_flags);
+
     mod.addCSourceFiles(.{
         .files = &.{
             "thirdparty/snappy/snappy.cc",
@@ -33,7 +49,7 @@ fn addCoreCSources(b: *Build, mod: *Build.Module) void {
             "thirdparty/snappy/snappy-sinksource.cc",
             "thirdparty/snappy/snappy-stubs-internal.cc",
         },
-        .flags = &(common_warn_flags ++ [_][]const u8{ "-std=c++17", "-DHAVE_CONFIG_H=1" }),
+        .flags = snappy_flags.items,
     });
 }
 
@@ -61,7 +77,7 @@ pub fn build(b: *Build) !void {
         .link_libcpp = true,
     });
 
-    addCoreCSources(b, core_mod);
+    addCoreCSources(b, core_mod, target);
 
     // The test suite has its own optimization mode so extension builds can
     // stay ReleaseFast while ordinary tests default to runtime-safe Debug.
@@ -75,7 +91,7 @@ pub fn build(b: *Build) !void {
         .sanitize_thread = tsan,
         .sanitize_c = sanitize_c,
     });
-    addCoreCSources(b, core_test_mod);
+    addCoreCSources(b, core_test_mod, target);
 
     const core_tests = b.addTest(.{ .root_module = core_test_mod });
     const test_step = b.step("test", "Run core unit tests (no Godot needed)");

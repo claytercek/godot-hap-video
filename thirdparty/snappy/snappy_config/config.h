@@ -1,5 +1,5 @@
-#ifndef BLUECADET_HAP_SNAPPY_CONFIG_H
-#define BLUECADET_HAP_SNAPPY_CONFIG_H
+#ifndef GODOT_HAP_SNAPPY_CONFIG_H
+#define GODOT_HAP_SNAPPY_CONFIG_H
 
 /* Snappy normally expects generated feature checks. The Zig build cross-compiles
  * all supported targets, so this header keeps the checks to stable compiler and
@@ -35,7 +35,11 @@
 #endif
 
 #ifndef SNAPPY_HAVE_SSSE3
-#  define SNAPPY_HAVE_SSSE3 0
+#  if defined(__SSSE3__)
+#    define SNAPPY_HAVE_SSSE3 1
+#  else
+#    define SNAPPY_HAVE_SSSE3 0
+#  endif
 #endif
 
 #ifndef SNAPPY_HAVE_X86_CRC32
@@ -43,7 +47,11 @@
 #endif
 
 #ifndef SNAPPY_HAVE_BMI2
-#  define SNAPPY_HAVE_BMI2 0
+#  if defined(__BMI2__)
+#    define SNAPPY_HAVE_BMI2 1
+#  else
+#    define SNAPPY_HAVE_BMI2 0
+#  endif
 #endif
 
 #ifndef SNAPPY_HAVE_NEON
@@ -65,4 +73,4 @@
 #  define SNAPPY_IS_BIG_ENDIAN 0
 #endif
 
-#endif /* BLUECADET_HAP_SNAPPY_CONFIG_H */
+#endif /* GODOT_HAP_SNAPPY_CONFIG_H */

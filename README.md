@@ -91,6 +91,16 @@ Godot **4.6 or later** is required by the shipped manifest. Use the Forward+
 or Mobile renderer. The Compatibility/OpenGL renderer has no
 `RenderingDevice`, so it cannot present Hap textures.
 
+CPU minimums, since there is no runtime CPU dispatch:
+
+- **x86_64**: Intel Haswell (2013) or newer, or the equivalent AMD part
+  (Excavator/Zen+ or newer). The vendored Snappy decompressor is built with
+  SSSE3 and BMI2 intrinsics for x86_64; BMI2 is the binding constraint. An
+  older x86_64 CPU will hit `SIGILL` decoding a Hap frame.
+- **aarch64/arm64**: the standard 64-bit Arm baseline (ARMv8-A). NEON is
+  mandatory in that ISA and always used, so no CPU beyond the baseline is
+  required.
+
 Each release includes debug and release binaries selected automatically by
 Godot's export mode:
 
