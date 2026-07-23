@@ -1,25 +1,21 @@
 # Godot auto-generated files
 .gen.*
 .godot/
+!project/.godot/
 *.import
 
-# Build artifacts
-bin/*
-!bin/.gitkeep
-build/
-.sconsign*.dblite
+# Development project build output; its manifest is tracked.
+project/.godot/*
+!project/.godot/extension_list.cfg
+project/lib/
 
-# Generated addon artifacts (binaries + .gdextension manifest)
-addons/hap_video/
+# Legacy generated output from the pre-project/addon layout.
+addons/
 
-# Custom build config
-custom.py
-
-# Fuzzer scratch state (regenerated locally by scripts/fuzz_demuxer.sh).
-# Curated crash/leak/oom finds that became regression tests live in
-# tests/fixtures/fuzz_regressions/ instead.
-tests/fuzz/corpus/
-tests/fuzz/crashes*/
+# Zig build
+.zig-cache/
+zig-out/
+zig-pkg/
 
 # Compile commands
 compile_commands.json
@@ -40,8 +36,6 @@ compile_commands.json
 !.vscode/extensions.json
 .DS_Store
 .idea/
-cmake-build*
-CMakeUserPresets.json
 
 # Other
 *.log

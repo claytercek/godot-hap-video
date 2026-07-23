@@ -1,7 +1,0 @@
-; Engine configuration for the Hap Video GDExtension test.
-; Minimal project.godot so the extension can load in the editor.
-
-[application]
-config/name="Hap Video Test"
-config/features=PackedStringArray("4.4")
-run/main_scene="res://demo/hap_player_demo.tscn"

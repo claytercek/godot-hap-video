@@ -1,0 +1,174 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: "Release tag to attach the packaged artifact to (e.g. v0.1.0)"
+        type: string
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      release-tag:
+        description: "Release tag to attach the packaged artifact to (e.g. v0.1.0)"
+        type: string
+        required: false
+        default: ""
+
+jobs:
+  build-macos:
+    name: Build macOS
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Build macOS slices
+        run: |
+          mkdir -p staging
+          for mode in ReleaseSafe ReleaseFast; do
+            flavor=debug
+            [ "$mode" = ReleaseFast ] && flavor=release
+            zig build -Dtarget=aarch64-macos -Doptimize=$mode --summary all
+            cp project/lib/libhap_video.dylib staging/libhap_video.macos-arm64.$flavor.dylib
+            zig build -Dtarget=x86_64-macos -Doptimize=$mode --summary all
+            cp project/lib/libhap_video.dylib staging/libhap_video.macos-x86_64.$flavor.dylib
+            lipo -create staging/libhap_video.macos-arm64.$flavor.dylib staging/libhap_video.macos-x86_64.$flavor.dylib -output staging/libhap_video.macos.$flavor.dylib
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hap-video-macos
+          path: |
+            staging/libhap_video.macos.debug.dylib
+            staging/libhap_video.macos.release.dylib
+          if-no-files-found: error
+          retention-days: 1
+
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Build Linux targets
+        run: |
+          mkdir -p staging
+          for target in x86_64-linux-gnu.2.31 aarch64-linux-gnu.2.31; do
+            arch=${target%%-*}
+            [ "$arch" = aarch64 ] && arch=arm64
+            for mode in ReleaseSafe ReleaseFast; do
+              flavor=debug
+              [ "$mode" = ReleaseFast ] && flavor=release
+              zig build "-Dtarget=$target" "-Doptimize=$mode" --summary all
+              cp project/lib/libhap_video.so "staging/libhap_video.linux.$flavor.$arch.so"
+            done
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hap-video-linux
+          path: staging/*.so
+          if-no-files-found: error
+          retention-days: 1
+
+  build-windows:
+    name: Build Windows
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Build Windows targets
+        run: |
+          mkdir -p staging
+          for target in x86_64-windows-gnu aarch64-windows-gnu; do
+            arch=${target%%-*}
+            [ "$arch" = aarch64 ] && arch=arm64
+            for mode in ReleaseSafe ReleaseFast; do
+              flavor=debug
+              [ "$mode" = ReleaseFast ] && flavor=release
+              zig build "-Dtarget=$target" "-Doptimize=$mode" --summary all
+              cp project/lib/hap_video.dll "staging/hap_video.windows.$flavor.$arch.dll"
+            done
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hap-video-windows
+          path: staging/*.dll
+          if-no-files-found: error
+          retention-days: 1
+
+  package:
+    name: Package & Publish
+    needs: [build-macos, build-linux, build-windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.release-tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hap-video-*
+          path: staging
+          merge-multiple: true
+      - name: Assemble addon
+        run: |
+          addon="addon-out/addons/hap_video"
+          mkdir -p "$addon/licenses"
+          cp staging/* "$addon/"
+          cp addon/hap_video.gdextension "$addon/"
+          cp README.md LICENSE.md "$addon/"
+          cp thirdparty/licenses/* "$addon/licenses/"
+          cp vendor/gdzig/LICENSE "$addon/licenses/LICENSE-gdzig.txt"
+      - name: Verify addon completeness
+        run: |
+          addon="addon-out/addons/hap_video"
+          for file in \
+            hap_video.gdextension README.md LICENSE.md licenses/LICENSE-hap.txt \
+            licenses/LICENSE-snappy.txt licenses/LICENSE-minimp4.txt licenses/LICENSE-gdzig.txt \
+            libhap_video.macos.debug.dylib libhap_video.macos.release.dylib \
+            libhap_video.linux.debug.x86_64.so libhap_video.linux.release.x86_64.so \
+            libhap_video.linux.debug.arm64.so libhap_video.linux.release.arm64.so \
+            hap_video.windows.debug.x86_64.dll hap_video.windows.release.x86_64.dll \
+            hap_video.windows.debug.arm64.dll hap_video.windows.release.arm64.dll
+          do
+            test -s "$addon/$file"
+          done
+      - name: Zip addon
+        run: |
+          zip_name="hap-video-${RELEASE_TAG:-${GITHUB_SHA}}.zip"
+          echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"
+          (cd addon-out && zip -r "../$zip_name" addons)
+      - name: Attach zip to GitHub Release
+        if: inputs.release-tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" "$ZIP_NAME" --clobber
+      - name: Upload workflow artifact (manual runs)
+        if: inputs.release-tag == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: hap-video
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error

@@ -1,64 +1,45 @@
 name: Sanitizers
 
-# MemorySanitizer is intentionally not run: it requires an instrumented
-# libc++/libc (and ideally an instrumented Godot/godot-cpp) to avoid false
-# positives from uninstrumented dependencies, which isn't set up here. Not
-# in scope for this workflow.
+# Sanitizer / safety-check lanes for the core test suite (`zig build test`),
+# run on every PR and nightly. Two lanes, two
+# different guarantees:
 #
-# oss-fuzz integration is a recorded future option, not implemented here;
-# fuzzing today is local-only via scripts/fuzz_demuxer.sh.
+#   - debug_safety: `-Dtest-optimize=Debug` turns on Zig's own runtime safety
+#     checks (bounds, overflow, etc.) for the core Zig code.
+#   - ubsan: `-Dtest-optimize=Debug -Dsanitize-c=full` layers
+#     UndefinedBehaviorSanitizer onto the vendored C/C++ the core links
+#     against (hap, minimp4, snappy).
+# No AddressSanitizer or ThreadSanitizer lane exists in this file.
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
 
 jobs:
-  asan_ubsan:
+  sanitize:
+    name: ${{ matrix.lane.name }}
     runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        shell: bash
+    strategy:
+      matrix:
+        lane:
+          - name: Debug safety checks
+            flags: -Dtest-optimize=Debug
+          - name: UBSan
+            flags: -Dtest-optimize=Debug -Dsanitize-c=full
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - uses: ./.github/actions/setup-deps
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
         with:
-          compiler: clang
+          version: 0.16.0
 
-      - name: Build (ASan+UBSan)
-        run: scons build_tests=1 sanitize=asan_ubsan use_llvm=yes target=template_debug
-
-      - name: Run core tests (ASan+UBSan)
-        run: scripts/run_core_tests.sh test_demuxer test_decoder test_concurrency test_scheduler test_fuzz_regressions
-        env:
-          ASAN_OPTIONS: detect_leaks=1
-
-  tsan:
-    runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        shell: bash
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: ./.github/actions/setup-deps
-        with:
-          compiler: clang
-
-      - name: Build (TSan)
-        run: scons build_tests=1 sanitize=tsan use_llvm=yes target=template_debug
-
-      - name: Run core tests (TSan)
-        run: scripts/run_core_tests.sh test_concurrency test_scheduler test_decoder
-        env:
-          TSAN_OPTIONS: halt_on_error=1
+      - name: Run core tests
+        run: zig build test ${{ matrix.lane.flags }} --summary all

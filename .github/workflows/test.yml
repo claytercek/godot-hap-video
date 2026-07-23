@@ -1,0 +1,79 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "project/**"
+      - "addon/**"
+      - "tools/**"
+      - "vendor/**"
+      - "thirdparty/**"
+      - "tests/**"
+      - "scripts/**"
+      - ".github/actions/**"
+      - ".gitmodules"
+      - "build.zig"
+      - "build.zig.zon"
+      - ".github/workflows/test.yml"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  native-macos:
+    name: Build, test & smoke (macOS)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Run core tests
+        run: zig build test --summary all
+
+      - name: Build extension
+        run: zig build --summary all
+
+      - name: Godot extension smoke test
+        timeout-minutes: 2
+        run: zig build smoke --summary all
+
+  cross-compile:
+    name: Compile (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-macos
+          - x86_64-macos
+          - x86_64-linux-gnu.2.31
+          - aarch64-linux-gnu.2.31
+          - x86_64-windows-gnu
+          - aarch64-windows-gnu
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Download Godot (for headers/bindgen)
+        uses: ./.github/actions/download-godot
+
+      - name: Build shipped target
+        run: zig build -Dtarget=${{ matrix.target }} --summary all

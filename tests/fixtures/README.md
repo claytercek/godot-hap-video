@@ -112,19 +112,19 @@ exporter produces one.
 
 ## Golden-frame regression tests
 
-Byte-exact golden-frame tests live in `tests/core/test_decoder.cpp` and run
-headless in CI (no GPU). Two layers:
+Byte-exact golden-frame tests live in `src/core/decoder_test.zig` and run via
+`zig build test`. Two layers:
 
-1. **Synthetic golden-frame tests** (`test_decoder_hap{1,5,7}_golden_frame`):
+1. **Synthetic golden-frame tests** (`decoder golden Hap{1,5,7} frame: ...`):
    construct known BC block bytes, wrap them in a None-compressor Hap frame,
-   decode, and `memcmp` the output against the input. These prove the
-   pass-through path does not corrupt block data.
+   decode, and compare the output against the input byte-for-byte. These
+   prove the pass-through path does not corrupt block data.
 
-2. **Fixture-based decode tests** (`test_decoder_hap{5,7}_fixture_frame0`):
-   demux the real `.mov` fixture, decode frame 0, and assert the texture
-   format and decoded byte count match `VideoTrackInfo::frame_bytes()`.
-   These exercise the Snappy decompress path the synthetic tests don't
-   cover.
+2. **Fixture-based decode tests** (`decoder Hap{5,7} fixture frame0 decodes
+   to ...`): demux the real `.mov` fixture, decode frame 0, and assert the
+   texture format and decoded byte count match `VideoTrackInfo`'s expected
+   frame size. These exercise the Snappy decompress path the synthetic
+   tests don't cover.
 
 The `*_frame0.png` stills alongside each fixture (extracted by
 `generate_fixtures.sh`) are a visual reference, not a test assertion.

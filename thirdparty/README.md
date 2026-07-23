@@ -1,8 +1,8 @@
 # Third-party code
 
 This directory vendors three C/C++ libraries used by the extension. All were
-added in a single initial commit and are built by SConstruct as static-lib
-side-targets (see the root SConstruct).
+added in a single initial commit and are compiled as part of the zig build
+(see `build.zig`).
 
 ## hap
 

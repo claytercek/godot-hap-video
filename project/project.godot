@@ -1,0 +1,10 @@
+; Development and verification project for the Hap Video GDExtension.
+config_version=5
+
+[application]
+config/name="Hap Video Demo"
+config/features=PackedStringArray("4.6")
+run/main_scene="res://demo/hap_player_demo.tscn"
+
+[rendering]
+renderer/rendering_method="forward_plus"
