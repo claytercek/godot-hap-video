@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.2.0](https://github.com/claytercek/godot-hap-video/compare/v0.1.0...v0.2.0) (2026-07-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **core,godot:** the C++ implementation and SCons build are removed. Build the extension with `zig build` (see README); the old SCons/godot-cpp workflow no longer exists.
+
+### Bug Fixes
+
+* **core:** leave decode output empty on failure ([f7c333f](https://github.com/claytercek/godot-hap-video/commit/f7c333fa3c8db389af107c6cef8fdc594e4d019e))
+* **core:** remove drained streams from pool map ([217c3f2](https://github.com/claytercek/godot-hap-video/commit/217c3f2459d25081001367f5f764367e60e58932))
+* **godot:** bound waitForOpen to 30s ([bd9b8d5](https://github.com/claytercek/godot-hap-video/commit/bd9b8d593c4fc110a96b5fbc66f37d4841f6eb32))
+* **godot:** route stepFrame through selected pair ([975cfff](https://github.com/claytercek/godot-hap-video/commit/975cfff1839a32345a033dadafd0b5ab2d08c941))
+
+
+### Performance
+
+* **core:** decode directly into texture buffer ([309a40a](https://github.com/claytercek/godot-hap-video/commit/309a40a6a8defb5a0ce546d4c5229fd43e1bd85d))
+* **core:** enable Snappy SSSE3/BMI2 on x86_64 ([d8bc282](https://github.com/claytercek/godot-hap-video/commit/d8bc282d979a1e7502b6460194a6df9fe0358d3b))
+* **godot:** reuse GPU staging buffers per ring slot ([2833d31](https://github.com/claytercek/godot-hap-video/commit/2833d3150100afded70893854eaea514cf4ef66f))
+
+
+### Refactoring
+
+* **core,godot:** port HAP video extension to Zig ([5926774](https://github.com/claytercek/godot-hap-video/commit/5926774bd904442146420ca871be576be87ea766))
+
 ## 0.1.0 (2026-07-13)
 
 
