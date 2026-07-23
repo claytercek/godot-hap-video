@@ -292,9 +292,9 @@ pub fn stop(self: *HapPlayer) void {
 /// be negative) via a priority seek. `n` is `i64`: gdzig bound-method
 /// marshalling supports only i64 integers; GDScript int is 64-bit anyway.
 pub fn stepFrame(self: *HapPlayer, n: i64) void {
-    const pb = self.playback orelse return;
+    const pb = self.selectedPlayback() orelse return;
     if (!pb.isReady()) return;
-    if (self.controller.stepFrame(n)) |request| pb.advance(request);
+    if (self.selectedController().stepFrame(n)) |request| pb.advance(request);
 }
 
 pub fn getTexture(self: *HapPlayer) ?*Texture2d {
