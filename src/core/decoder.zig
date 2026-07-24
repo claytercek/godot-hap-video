@@ -32,11 +32,6 @@ const hap_decode = @import("hap_decode.zig");
 
 const DecodedFrame = hap_frame.DecodedFrame;
 
-/// HapResult_No_Error -- the C hap.c success code, kept for the test-only
-/// HapEncode path (test_support.zig/concurrency_test.zig) that still drives
-/// the vendored encoder while it builds synthetic chunked frames.
-pub const HapResult_No_Error: c_uint = 0;
-
 /// HapM (dual-texture) frames carry exactly two textures -- e.g.
 /// YCoCg_DXT5 + A_RGTC1 for the combined-alpha case -- so a valid frame
 /// never has more than this many.

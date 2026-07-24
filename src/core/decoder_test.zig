@@ -26,16 +26,9 @@ const fixture_hapy = "tests/fixtures/hapy.mov";
 
 // -----------------------------------------------------------------------
 // Frame queries go through hap_decode's Zig API (frameTextureCount /
-// frameTextureChunkCount). buildRawFrame/createChunkedFrame (and the
-// HapMaxEncodedLength/HapEncode externs they need, which still drive the
-// vendored C encoder) live in test_support.zig, shared with
-// concurrency_test.zig. The constants below are the API texture-format /
-// compressor codes HapEncode expects.
+// frameTextureChunkCount). buildRawFrame/createChunkedFrame live in
+// test_support.zig, shared with concurrency_test.zig.
 // -----------------------------------------------------------------------
-
-const HapTextureFormat_RGB_DXT1: c_uint = 0x83F0;
-const HapTextureFormat_YCoCg_DXT5: c_uint = 0x01;
-const HapCompressorSnappy: c_uint = 1;
 
 /// Decode frame 0 of a fixture .mov file. Propagates
 /// MmapReader.InitError.OpenFailed so callers can treat a missing fixture
@@ -449,8 +442,7 @@ test "decoder Hap7 fixture frame0 decodes to track-sized RGBA_BPTC_UNORM" {
 // -----------------------------------------------------------------------
 
 test "decoder chunked BC1 (Hap1) decode is byte-identical to unchunked" {
-    // 64x32 pixels = 128 BC1 blocks (1024 bytes); large enough for HapEncode
-    // to produce a Complex frame.
+    // 64x32 pixels = 128 BC1 blocks (1024 bytes).
     var bc1_blocks: [1024]u8 = undefined;
     var i: usize = 0;
     while (i < bc1_blocks.len) : (i += 8) {
@@ -468,7 +460,7 @@ test "decoder chunked BC1 (Hap1) decode is byte-identical to unchunked" {
     defer testing.allocator.free(unchunked);
     try testing.expect(unchunked.len > 0);
 
-    const chunked = try test_support.createChunkedFrame(testing.allocator, &bc1_blocks, 4, HapTextureFormat_RGB_DXT1, HapCompressorSnappy);
+    const chunked = try test_support.createChunkedFrame(testing.allocator, &bc1_blocks, 4, .rgb_dxt1);
     defer testing.allocator.free(chunked);
     try testing.expect(chunked.len > 0);
 
@@ -506,13 +498,13 @@ test "decoder chunked HapY (YCoCg-DXT5) decode is byte-identical to unchunked" {
         bc3_blocks[i + 9] = 0xFF; // color endpoints: white
     }
 
-    // Encode unchunked via HapEncode (1 chunk, Snappy).
-    const unchunked = try test_support.createChunkedFrame(testing.allocator, &bc3_blocks, 1, HapTextureFormat_YCoCg_DXT5, HapCompressorSnappy);
+    // Build unchunked (1 chunk) and chunked (4 chunks) Complex frames from
+    // the same texture data.
+    const unchunked = try test_support.createChunkedFrame(testing.allocator, &bc3_blocks, 1, .ycocg_dxt5);
     defer testing.allocator.free(unchunked);
     try testing.expect(unchunked.len > 0);
 
-    // Encode chunked via HapEncode (4 chunks, Snappy).
-    const chunked = try test_support.createChunkedFrame(testing.allocator, &bc3_blocks, 4, HapTextureFormat_YCoCg_DXT5, HapCompressorSnappy);
+    const chunked = try test_support.createChunkedFrame(testing.allocator, &bc3_blocks, 4, .ycocg_dxt5);
     defer testing.allocator.free(chunked);
     try testing.expect(chunked.len > 0);
 
@@ -520,7 +512,7 @@ test "decoder chunked HapY (YCoCg-DXT5) decode is byte-identical to unchunked" {
     try testing.expect(chunked.len >= 4);
     try testing.expectEqual(@as(u8, 0xCF), chunked[3]);
 
-    try testing.expect(try hap_decode.frameTextureChunkCount(chunked, 0) >= 2);
+    try testing.expectEqual(@as(u32, 4), try hap_decode.frameTextureChunkCount(chunked, 0));
 
     var out_unchunked: DecodedFrame = .{};
     defer out_unchunked.deinit(testing.allocator);
