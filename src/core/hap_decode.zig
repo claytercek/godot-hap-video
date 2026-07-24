@@ -429,32 +429,7 @@ pub fn decodeTexture(
 // -----------------------------------------------------------------------
 
 const testing = std.testing;
-
-/// Build a [size24][type] section header wrapping `payload`.
-fn buildSection(allocator: std.mem.Allocator, type_byte: u8, payload: []const u8) ![]u8 {
-    const out = try allocator.alloc(u8, 4 + payload.len);
-    const len: u32 = @intCast(payload.len);
-    out[0] = @truncate(len);
-    out[1] = @truncate(len >> 8);
-    out[2] = @truncate(len >> 16);
-    out[3] = type_byte;
-    @memcpy(out[4..], payload);
-    return out;
-}
-
-/// Build a section using the extended 8-byte header form (24-bit size zero,
-/// real size in bytes 4..7). The only way to encode a zero-length section,
-/// since the short form's zero size selects this extended form.
-fn buildSectionExt(allocator: std.mem.Allocator, type_byte: u8, payload: []const u8) ![]u8 {
-    const out = try allocator.alloc(u8, 8 + payload.len);
-    out[0] = 0;
-    out[1] = 0;
-    out[2] = 0;
-    out[3] = type_byte;
-    std.mem.writeInt(u32, out[4..8], @intCast(payload.len), .little);
-    @memcpy(out[8..], payload);
-    return out;
-}
+const test_support = @import("test_support.zig");
 
 /// Build a Complex texture frame (single top-level texture) from None-
 /// compressor chunks. When `with_offsets` is true an offset table (equal to
@@ -487,11 +462,11 @@ fn buildComplexNone(
         try frame_data.appendSlice(allocator, chunk);
     }
 
-    const sec_comp = try buildSection(allocator, section_chunk_compressor_table, compressor_tbl);
+    const sec_comp = try test_support.buildSection(allocator, section_chunk_compressor_table, compressor_tbl);
     defer allocator.free(sec_comp);
-    const sec_size = try buildSection(allocator, section_chunk_size_table, size_tbl);
+    const sec_size = try test_support.buildSection(allocator, section_chunk_size_table, size_tbl);
     defer allocator.free(sec_size);
-    const sec_off = try buildSection(allocator, section_chunk_offset_table, offset_tbl);
+    const sec_off = try test_support.buildSection(allocator, section_chunk_offset_table, offset_tbl);
     defer allocator.free(sec_off);
 
     var container_body = std.ArrayListUnmanaged(u8).empty;
@@ -500,7 +475,7 @@ fn buildComplexNone(
     try container_body.appendSlice(allocator, sec_size);
     if (with_offsets) try container_body.appendSlice(allocator, sec_off);
 
-    const container = try buildSection(allocator, section_decode_instructions, container_body.items);
+    const container = try test_support.buildSection(allocator, section_decode_instructions, container_body.items);
     defer allocator.free(container);
 
     var payload = std.ArrayListUnmanaged(u8).empty;
@@ -509,7 +484,7 @@ fn buildComplexNone(
     try payload.appendSlice(allocator, frame_data.items);
 
     const type_byte = (compressor_complex << 4) | (format_nibble & 0x0F);
-    return buildSection(allocator, type_byte, payload.items);
+    return test_support.buildSection(allocator, type_byte, payload.items);
 }
 
 test "readSectionHeader parses a 4-byte header" {
@@ -550,16 +525,16 @@ test "readSectionHeader rejects a size that overruns the buffer" {
 
 test "frameTextureCount returns 1 for a single-texture frame" {
     const payload = [_]u8{0} ** 8;
-    const frame = try buildSection(testing.allocator, 0xAB, &payload);
+    const frame = try test_support.buildSection(testing.allocator, 0xAB, &payload);
     defer testing.allocator.free(frame);
     try testing.expectEqual(@as(u32, 1), try frameTextureCount(frame));
 }
 
 test "frameTextureCount walks multi-image sub-sections" {
     const block = [_]u8{0} ** 8;
-    const sub0 = try buildSection(testing.allocator, 0xAB, &block);
+    const sub0 = try test_support.buildSection(testing.allocator, 0xAB, &block);
     defer testing.allocator.free(sub0);
-    const sub1 = try buildSection(testing.allocator, 0xAB, &block);
+    const sub1 = try test_support.buildSection(testing.allocator, 0xAB, &block);
     defer testing.allocator.free(sub1);
 
     var body = std.ArrayListUnmanaged(u8).empty;
@@ -567,7 +542,7 @@ test "frameTextureCount walks multi-image sub-sections" {
     try body.appendSlice(testing.allocator, sub0);
     try body.appendSlice(testing.allocator, sub1);
 
-    const frame = try buildSection(testing.allocator, section_multi_image, body.items);
+    const frame = try test_support.buildSection(testing.allocator, section_multi_image, body.items);
     defer testing.allocator.free(frame);
 
     try testing.expectEqual(@as(u32, 2), try frameTextureCount(frame));
@@ -575,7 +550,7 @@ test "frameTextureCount walks multi-image sub-sections" {
 
 test "frameTextureFormat maps the format nibble" {
     const payload = [_]u8{0} ** 8;
-    const frame = try buildSection(testing.allocator, 0xAF, &payload); // None|YCoCg
+    const frame = try test_support.buildSection(testing.allocator, 0xAF, &payload); // None|YCoCg
     defer testing.allocator.free(frame);
     try testing.expectEqual(HapTextureFormat.ycocg_dxt5, try frameTextureFormat(frame, 0));
 }
@@ -583,7 +558,7 @@ test "frameTextureFormat maps the format nibble" {
 test "decodeTexture rejects BC6H (Hap HDR) format nibbles" {
     const payload = [_]u8{0} ** 8;
     inline for (.{ 0xA2, 0xA3 }) |type_byte| { // None|BC6H-unsigned / -signed
-        const frame = try buildSection(testing.allocator, type_byte, &payload);
+        const frame = try test_support.buildSection(testing.allocator, type_byte, &payload);
         defer testing.allocator.free(frame);
         var out = std.ArrayListUnmanaged(u8).empty;
         defer out.deinit(testing.allocator);
@@ -593,7 +568,7 @@ test "decodeTexture rejects BC6H (Hap HDR) format nibbles" {
 
 test "decodeTexture copies a None-compressor texture verbatim" {
     const bc = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
-    const frame = try buildSection(testing.allocator, 0xAB, &bc);
+    const frame = try test_support.buildSection(testing.allocator, 0xAB, &bc);
     defer testing.allocator.free(frame);
 
     var out = std.ArrayListUnmanaged(u8).empty;
@@ -641,11 +616,11 @@ test "parseComplexInstructions skips unknown sub-sections" {
     var size_tbl: [4]u8 = undefined;
     std.mem.writeInt(u32, &size_tbl, c0.len, .little);
 
-    const unknown = try buildSection(testing.allocator, 0x7F, &[_]u8{ 0xFF, 0xFF });
+    const unknown = try test_support.buildSection(testing.allocator, 0x7F, &[_]u8{ 0xFF, 0xFF });
     defer testing.allocator.free(unknown);
-    const sec_comp = try buildSection(testing.allocator, section_chunk_compressor_table, &compressor_tbl);
+    const sec_comp = try test_support.buildSection(testing.allocator, section_chunk_compressor_table, &compressor_tbl);
     defer testing.allocator.free(sec_comp);
-    const sec_size = try buildSection(testing.allocator, section_chunk_size_table, &size_tbl);
+    const sec_size = try test_support.buildSection(testing.allocator, section_chunk_size_table, &size_tbl);
     defer testing.allocator.free(sec_size);
 
     var container_body = std.ArrayListUnmanaged(u8).empty;
@@ -654,7 +629,7 @@ test "parseComplexInstructions skips unknown sub-sections" {
     try container_body.appendSlice(testing.allocator, sec_comp);
     try container_body.appendSlice(testing.allocator, sec_size);
 
-    const container = try buildSection(testing.allocator, section_decode_instructions, container_body.items);
+    const container = try test_support.buildSection(testing.allocator, section_decode_instructions, container_body.items);
     defer testing.allocator.free(container);
 
     var payload = std.ArrayListUnmanaged(u8).empty;
@@ -662,7 +637,7 @@ test "parseComplexInstructions skips unknown sub-sections" {
     try payload.appendSlice(testing.allocator, container);
     try payload.appendSlice(testing.allocator, &c0);
 
-    const frame = try buildSection(testing.allocator, 0xCB, payload.items);
+    const frame = try test_support.buildSection(testing.allocator, 0xCB, payload.items);
     defer testing.allocator.free(frame);
 
     _ = chunk_slices;
@@ -678,9 +653,9 @@ test "parseComplexInstructions rejects mismatched table chunk counts" {
     var size_tbl: [4]u8 = undefined;
     std.mem.writeInt(u32, &size_tbl, 4, .little);
 
-    const sec_comp = try buildSection(testing.allocator, section_chunk_compressor_table, &compressor_tbl);
+    const sec_comp = try test_support.buildSection(testing.allocator, section_chunk_compressor_table, &compressor_tbl);
     defer testing.allocator.free(sec_comp);
-    const sec_size = try buildSection(testing.allocator, section_chunk_size_table, &size_tbl);
+    const sec_size = try test_support.buildSection(testing.allocator, section_chunk_size_table, &size_tbl);
     defer testing.allocator.free(sec_size);
 
     var container_body = std.ArrayListUnmanaged(u8).empty;
@@ -688,10 +663,10 @@ test "parseComplexInstructions rejects mismatched table chunk counts" {
     try container_body.appendSlice(testing.allocator, sec_comp);
     try container_body.appendSlice(testing.allocator, sec_size);
 
-    const container = try buildSection(testing.allocator, section_decode_instructions, container_body.items);
+    const container = try test_support.buildSection(testing.allocator, section_decode_instructions, container_body.items);
     defer testing.allocator.free(container);
 
-    const frame = try buildSection(testing.allocator, 0xCB, container);
+    const frame = try test_support.buildSection(testing.allocator, 0xCB, container);
     defer testing.allocator.free(frame);
 
     try testing.expectError(error.InvalidFrame, frameTextureChunkCount(frame, 0));
@@ -704,9 +679,9 @@ test "decodeTexture rejects a chunk with a bad compressor byte" {
     std.mem.writeInt(u32, &size_tbl, 2, .little);
     const chunk = [_]u8{ 0x01, 0x02 };
 
-    const sec_comp = try buildSection(testing.allocator, section_chunk_compressor_table, &compressor_tbl);
+    const sec_comp = try test_support.buildSection(testing.allocator, section_chunk_compressor_table, &compressor_tbl);
     defer testing.allocator.free(sec_comp);
-    const sec_size = try buildSection(testing.allocator, section_chunk_size_table, &size_tbl);
+    const sec_size = try test_support.buildSection(testing.allocator, section_chunk_size_table, &size_tbl);
     defer testing.allocator.free(sec_size);
 
     var container_body = std.ArrayListUnmanaged(u8).empty;
@@ -714,7 +689,7 @@ test "decodeTexture rejects a chunk with a bad compressor byte" {
     try container_body.appendSlice(testing.allocator, sec_comp);
     try container_body.appendSlice(testing.allocator, sec_size);
 
-    const container = try buildSection(testing.allocator, section_decode_instructions, container_body.items);
+    const container = try test_support.buildSection(testing.allocator, section_decode_instructions, container_body.items);
     defer testing.allocator.free(container);
 
     var payload = std.ArrayListUnmanaged(u8).empty;
@@ -722,7 +697,7 @@ test "decodeTexture rejects a chunk with a bad compressor byte" {
     try payload.appendSlice(testing.allocator, container);
     try payload.appendSlice(testing.allocator, &chunk);
 
-    const frame = try buildSection(testing.allocator, 0xCB, payload.items);
+    const frame = try test_support.buildSection(testing.allocator, 0xCB, payload.items);
     defer testing.allocator.free(frame);
 
     var out = std.ArrayListUnmanaged(u8).empty;
@@ -734,9 +709,9 @@ test "decodeTexture rejects a Complex frame with zero chunks" {
     // Empty compressor and size tables -> chunk count 0. A zero-length
     // section must use the extended 8-byte header form.
     const empty = [_]u8{};
-    const sec_comp = try buildSectionExt(testing.allocator, section_chunk_compressor_table, &empty);
+    const sec_comp = try test_support.buildSectionExt(testing.allocator, section_chunk_compressor_table, &empty);
     defer testing.allocator.free(sec_comp);
-    const sec_size = try buildSectionExt(testing.allocator, section_chunk_size_table, &empty);
+    const sec_size = try test_support.buildSectionExt(testing.allocator, section_chunk_size_table, &empty);
     defer testing.allocator.free(sec_size);
 
     var container_body = std.ArrayListUnmanaged(u8).empty;
@@ -744,10 +719,10 @@ test "decodeTexture rejects a Complex frame with zero chunks" {
     try container_body.appendSlice(testing.allocator, sec_comp);
     try container_body.appendSlice(testing.allocator, sec_size);
 
-    const container = try buildSection(testing.allocator, section_decode_instructions, container_body.items);
+    const container = try test_support.buildSection(testing.allocator, section_decode_instructions, container_body.items);
     defer testing.allocator.free(container);
 
-    const frame = try buildSection(testing.allocator, 0xCB, container);
+    const frame = try test_support.buildSection(testing.allocator, 0xCB, container);
     defer testing.allocator.free(frame);
 
     // The query reports 0; decode rejects it.
@@ -765,9 +740,9 @@ test "decodeComplex bounds-checks a chunk size against the frame data" {
     std.mem.writeInt(u32, &size_tbl, 16, .little);
     const chunk = [_]u8{ 0x01, 0x02 };
 
-    const sec_comp = try buildSection(testing.allocator, section_chunk_compressor_table, &compressor_tbl);
+    const sec_comp = try test_support.buildSection(testing.allocator, section_chunk_compressor_table, &compressor_tbl);
     defer testing.allocator.free(sec_comp);
-    const sec_size = try buildSection(testing.allocator, section_chunk_size_table, &size_tbl);
+    const sec_size = try test_support.buildSection(testing.allocator, section_chunk_size_table, &size_tbl);
     defer testing.allocator.free(sec_size);
 
     var container_body = std.ArrayListUnmanaged(u8).empty;
@@ -775,7 +750,7 @@ test "decodeComplex bounds-checks a chunk size against the frame data" {
     try container_body.appendSlice(testing.allocator, sec_comp);
     try container_body.appendSlice(testing.allocator, sec_size);
 
-    const container = try buildSection(testing.allocator, section_decode_instructions, container_body.items);
+    const container = try test_support.buildSection(testing.allocator, section_decode_instructions, container_body.items);
     defer testing.allocator.free(container);
 
     var payload = std.ArrayListUnmanaged(u8).empty;
@@ -783,7 +758,7 @@ test "decodeComplex bounds-checks a chunk size against the frame data" {
     try payload.appendSlice(testing.allocator, container);
     try payload.appendSlice(testing.allocator, &chunk);
 
-    const frame = try buildSection(testing.allocator, 0xCB, payload.items);
+    const frame = try test_support.buildSection(testing.allocator, 0xCB, payload.items);
     defer testing.allocator.free(frame);
 
     var out = std.ArrayListUnmanaged(u8).empty;

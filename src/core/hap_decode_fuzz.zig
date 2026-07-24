@@ -73,21 +73,6 @@ fn fuzzDecode(context: void, smith: *testing.Smith) !void {
 // into section/table parsing.
 // -----------------------------------------------------------------------
 
-/// Build a section using the extended 8-byte header form (24-bit size
-/// zero, real size in bytes 4..7) -- the only way to encode a zero-length
-/// section, since the short form's zero size selects this extended form.
-/// Duplicated from hap_decode.zig's private test helper of the same name.
-fn buildSectionExt(allocator: std.mem.Allocator, type_byte: u8, payload: []const u8) ![]u8 {
-    const out = try allocator.alloc(u8, 8 + payload.len);
-    out[0] = 0;
-    out[1] = 0;
-    out[2] = 0;
-    out[3] = type_byte;
-    std.mem.writeInt(u32, out[4..8], @intCast(payload.len), .little);
-    @memcpy(out[8..], payload);
-    return out;
-}
-
 /// Build a handful of syntactically valid Hap frames covering: every
 /// supported None-compressor format nibble, the two rejected BC6H (Hap HDR)
 /// nibbles, Complex (chunked) frames with compressible chunk data (so some
@@ -138,7 +123,7 @@ fn buildSeedFrames(allocator: std.mem.Allocator) !std.ArrayListUnmanaged([]u8) {
 
     // Extended (8-byte) section header, zero-length payload -- forces the
     // 24-bit-size-zero branch in readSectionHeader.
-    try list.append(allocator, try buildSectionExt(allocator, 0xAB, &.{}));
+    try list.append(allocator, try test_support.buildSectionExt(allocator, 0xAB, &.{}));
 
     return list;
 }
