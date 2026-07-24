@@ -145,7 +145,7 @@ jobs:
         run: |
           addon="addon-out/addons/hap_video"
           for file in \
-            hap_video.gdextension README.md LICENSE.md licenses/LICENSE-hap.txt \
+            hap_video.gdextension README.md LICENSE.md \
             licenses/LICENSE-snappy.txt licenses/LICENSE-minimp4.txt licenses/LICENSE-gdzig.txt \
             libhap_video.macos.debug.dylib libhap_video.macos.release.dylib \
             libhap_video.linux.debug.x86_64.so libhap_video.linux.release.x86_64.so \

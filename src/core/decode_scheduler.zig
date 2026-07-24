@@ -24,10 +24,11 @@
 //!   _ = scheduler.notifyCapacityAvailable(); // resume prefetch
 //!
 //! Seeking: requestFrame() again with a different index. The in-flight
-//! decode (if any) finishes first -- Snappy/hap.c are not
-//! cancellation-safe -- then the queue is drained and refilled from the
-//! new position. Calling requestFrame() again before the previous seek
-//! has been applied simply overwrites the target: latest seek wins.
+//! decode (if any) finishes first -- Snappy decode and hap_decode.zig's
+//! frame parsing are not cancellation-safe -- then the queue is drained
+//! and refilled from the new position. Calling requestFrame() again
+//! before the previous seek has been applied simply overwrites the
+//! target: latest seek wins.
 //!
 //! Design notes:
 //!   * Open completion is published as scheduler-owned state. Callers poll

@@ -54,7 +54,7 @@
 //!
 //! `zig build test --fuzz` (the real coverage-guided engine) does not
 //! currently link for this module: `-ffuzz` instruments the vendored C
-//! sources (hap.c, minimp4.c, snappy.cc) with clang's classic
+//! sources (minimp4.c, snappy.cc) with clang's classic
 //! `-fsanitize-coverage=trace-cmp` calls (`__sanitizer_cov_trace_cmp*` /
 //! `_switch` / `_const_cmp*`), but Zig's own from-scratch fuzzer runtime
 //! doesn't implement that ABI -- only the pure-Zig coverage path does,

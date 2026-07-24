@@ -1,18 +1,14 @@
 # Third-party code
 
-This directory vendors three C/C++ libraries used by the extension. All were
+This directory vendors two C/C++ libraries used by the extension. Both were
 added in a single initial commit and are compiled as part of the zig build
-(see `build.zig`).
-
-## hap
-
-- Upstream: https://github.com/Vidvox/hap
-- Files: `thirdparty/hap/hap.c`, `thirdparty/hap/hap.h`
-- License: `thirdparty/licenses/LICENSE-hap.txt`
-- Upstream version: unrecorded. The vendored files carry no version define
-  or commit reference, and the copyright header only dates the library to
-  2011-2013. Vendored 2026-07-11 (date of the commit that introduced it,
-  `90ece50`).
+(see `build.zig`). A third, `hap` (the reference Vidvox Hap codec), was
+vendored in that same commit but has since been replaced: frame decode is
+now a clean-room Zig implementation (`src/core/hap_decode.zig`), and its
+last remaining test-support use (`HapEncode`, for building synthetic
+chunked frames) was replaced by a hand-written Zig frame builder in
+`src/core/test_support.zig`. `thirdparty/hap` was removed once nothing
+referenced it.
 
 ## minimp4
 
@@ -59,4 +55,7 @@ confirm upstream has since fixed the same issue).
 | `fc098ce` | `thirdparty/minimp4/minimp4.h` | Widen `count * elemsize` malloc-size expressions to 64-bit before multiplying, so overflow can't wrap the size below `minimp4_bounded_malloc`'s check and under-allocate a buffer the parser then writes past. |
 | `74b9d08` | `thirdparty/minimp4/minimp4.h` | Guard `MP4D_frame_offset` against a chunk/sample count being set without its matching array being allocated (can happen when a malformed file's second, oversized `stco`/`stsz` box hits an out-of-memory path after the first allocation was freed). |
 | `5965126` | `thirdparty/minimp4/minimp4.h` | Bail out of `BOX_ctts` once its declared entry count runs past the box's actual payload, instead of reading zero-padding forever — a file could otherwise claim ~4 billion entries in a few bytes on disk. |
-| `2125503` | `thirdparty/hap/hap.c`        | Match `hap_decode_chunk`'s signature to the `HapDecodeWorkFunction` callback type it's invoked through, instead of casting a function pointer to a different parameter list (undefined behavior caught by UBSan's `-fsanitize=function`). |
+
+The `2125503` patch (a UBSan fix to `thirdparty/hap/hap.c`'s callback
+signature) no longer applies -- it was removed along with the rest of
+`thirdparty/hap`.
