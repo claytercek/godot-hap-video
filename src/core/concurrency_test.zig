@@ -433,7 +433,7 @@ test "inner pool survives concurrent execute calls" {
     const kChunks: u32 = 37;
 
     const Ctx = struct {
-        fn work(p: ?*anyopaque, index: c_uint) callconv(.c) void {
+        fn work(p: ?*anyopaque, index: c_uint) void {
             const acc: *std.atomic.Value(i32) = @ptrCast(@alignCast(p.?));
             _ = acc.fetchAdd(@intCast(index), .monotonic);
         }
@@ -482,7 +482,7 @@ const WorkItem = struct {
     call_count: std.atomic.Value(u32) = .init(0),
 };
 
-fn testWorkFunction(p: ?*anyopaque, index: c_uint) callconv(.c) void {
+fn testWorkFunction(p: ?*anyopaque, index: c_uint) void {
     _ = index;
     const item: *WorkItem = @ptrCast(@alignCast(p.?));
     _ = item.call_count.fetchAdd(1, .monotonic);
