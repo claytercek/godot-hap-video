@@ -125,10 +125,11 @@ fn formatNibble(format: hap_frame.HapTextureFormat) u8 {
     };
 }
 
-/// Build a [size24][type] section header wrapping `payload`. Only used here
-/// for the (small) decode-instructions container and its sub-sections, so
-/// the short 4-byte form always suffices.
-fn buildSection(allocator: std.mem.Allocator, type_byte: u8, payload: []const u8) ![]u8 {
+/// Build a [size24][type] section header wrapping `payload`, using the short
+/// 4-byte header form. Shared by every *_test.zig / *_fuzz.zig file that
+/// needs to hand-build Hap wire bytes (decoder_test.zig, hap_decode.zig's
+/// own inline tests, hap_decode_fuzz.zig's seed frames).
+pub fn buildSection(allocator: std.mem.Allocator, type_byte: u8, payload: []const u8) ![]u8 {
     const out = try allocator.alloc(u8, 4 + payload.len);
     const len: u32 = @intCast(payload.len);
     out[0] = @truncate(len);
@@ -136,6 +137,20 @@ fn buildSection(allocator: std.mem.Allocator, type_byte: u8, payload: []const u8
     out[2] = @truncate(len >> 16);
     out[3] = type_byte;
     @memcpy(out[4..], payload);
+    return out;
+}
+
+/// Build a section using the extended 8-byte header form (24-bit size zero,
+/// real size in bytes 4..7). The only way to encode a zero-length section,
+/// since the short form's zero size selects this extended form.
+pub fn buildSectionExt(allocator: std.mem.Allocator, type_byte: u8, payload: []const u8) ![]u8 {
+    const out = try allocator.alloc(u8, 8 + payload.len);
+    out[0] = 0;
+    out[1] = 0;
+    out[2] = 0;
+    out[3] = type_byte;
+    std.mem.writeInt(u32, out[4..8], @intCast(payload.len), .little);
+    @memcpy(out[8..], payload);
     return out;
 }
 
