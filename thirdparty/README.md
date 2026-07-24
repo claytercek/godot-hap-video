@@ -10,6 +10,13 @@ chunked frames) was replaced by a hand-written Zig frame builder in
 `src/core/test_support.zig`. `thirdparty/hap` was removed once nothing
 referenced it.
 
+`hap_decode.zig` is a clean-room implementation written from the published
+Hap bitstream specification (`HapVideoDRAFT.md` in the Vidvox/hap repo), not
+a port of `hap.c`; it carries none of that file's BSD-licensed code. With
+`thirdparty/hap` gone, `thirdparty/licenses/LICENSE-hap.txt` no longer
+applies to anything in this repo and was removed with it -- the spec
+document remains the reference for the wire format.
+
 ## minimp4
 
 - Upstream: https://github.com/lieff/minimp4 (a fork of the original
