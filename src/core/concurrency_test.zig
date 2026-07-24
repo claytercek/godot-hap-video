@@ -20,6 +20,7 @@ const frame_queue = @import("frame_queue.zig");
 const outer_thread_pool = @import("outer_thread_pool.zig");
 const thread_pool = @import("thread_pool.zig");
 const decoder = @import("decoder.zig");
+const hap_decode = @import("hap_decode.zig");
 const test_support = @import("test_support.zig");
 const sync = @import("sync.zig");
 
@@ -42,25 +43,14 @@ fn ensureOneTexture(list: *std.ArrayListUnmanaged(hap_frame.DecodedTexture), all
 }
 
 // -----------------------------------------------------------------------
-// hap.c externs needed only by this test file (createUnchunkedHap1/
-// createChunkedFrame's HapMaxEncodedLength/HapEncode externs live in
-// test_support.zig, shared with decoder_test.zig).
+// Frame builders (createChunkedFrame and its HapMaxEncodedLength/HapEncode
+// externs) live in test_support.zig, shared with decoder_test.zig. The
+// constants below are the API texture-format / compressor codes HapEncode
+// expects.
 // -----------------------------------------------------------------------
 
 const HapTextureFormat_RGB_DXT1: c_uint = 0x83F0;
 const HapCompressorSnappy: c_uint = 1;
-
-extern fn HapDecode(
-    input_buffer: ?*const anyopaque,
-    input_buffer_bytes: c_ulong,
-    index: c_uint,
-    callback: ?thread_pool.HapDecodeCallback,
-    info: ?*anyopaque,
-    output_buffer: ?*anyopaque,
-    output_buffer_bytes: c_ulong,
-    output_buffer_bytes_used: *c_ulong,
-    output_buffer_texture_format: *c_uint,
-) c_uint;
 
 // -----------------------------------------------------------------------
 // RetireRing
@@ -568,84 +558,44 @@ test "thread pool large count" {
 }
 
 // -----------------------------------------------------------------------
-// Callback contract: verify HapDecode respects the single-chunk contract
-// (this is thread-pool dispatch behavior, not decode-correctness
-// behavior)
+// Chunked decode through the shared InnerThreadPool: a single-chunk frame
+// decodes inline on the calling thread, while a multi-chunk frame drives
+// the pool. Both must round-trip to the original texture bytes. (Pool
+// dispatch behavior, not decode-format coverage -- decoder_test owns that.)
 // -----------------------------------------------------------------------
 
-var callback_invocation_count: u32 = 0;
-
-fn trackingCallback(
-    function: thread_pool.HapDecodeWorkFunction,
-    p: ?*anyopaque,
-    count: c_uint,
-    info: ?*anyopaque,
-) callconv(.c) void {
-    callback_invocation_count += 1;
-    // Forward to the inner pool for proper multi-threaded decode.
-    thread_pool.hapInnerDecodeCallback(function, p, count, info);
-}
-
-test "decoder callback not invoked for single chunk" {
-    // Create an unchunked frame and decode it with our tracking callback.
-    const bc1_block = [_]u8{ 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-    const frame = try test_support.buildRawFrame(testing.allocator, &bc1_block, 0xAB); // None|DXT1
+test "single-chunk frame decodes inline" {
+    const bc1_data = [_]u8{ 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    const frame = try test_support.createChunkedFrame(testing.allocator, &bc1_data, 1, HapTextureFormat_RGB_DXT1, HapCompressorSnappy);
     defer testing.allocator.free(frame);
 
-    var tex_format: c_uint = 0;
-    var bytes_used: c_ulong = 0;
-    var output: [1024]u8 = undefined;
+    var output: hap_frame.DecodedFrame = .{};
+    defer output.deinit(testing.allocator);
 
-    callback_invocation_count = 0;
-
-    const result = HapDecode(
-        frame.ptr,
-        @intCast(frame.len),
-        0,
-        trackingCallback,
-        null,
-        &output,
-        @intCast(output.len),
-        &bytes_used,
-        &tex_format,
-    );
-
-    try testing.expectEqual(decoder.HapResult_No_Error, result);
-
-    // The callback must NOT have been invoked for a single-chunk frame.
-    try testing.expectEqual(@as(u32, 0), callback_invocation_count);
+    try decoder.decode(testing.allocator, frame, &output);
+    try testing.expectEqual(@as(usize, 1), output.textures.items.len);
+    try testing.expectEqualSlices(u8, &bc1_data, output.textures.items[0].data.items);
 }
 
-test "decoder callback invoked for multi chunk" {
-    // Create raw BC1 data (1024 bytes = 128 BC1 blocks), large enough for
-    // HapEncode to produce a Complex (chunked) frame.
-    const bc1_data = [_]u8{0} ** 1024;
+test "multi-chunk frame decodes via the inner pool" {
+    // 1024 bytes = 128 BC1 blocks of a uniform (highly compressible) white
+    // pattern, so HapEncode keeps all four requested chunks rather than
+    // collapsing to one. Decoding it drives the shared InnerThreadPool.
+    var bc1_data: [1024]u8 = [_]u8{0} ** 1024;
+    var i: usize = 0;
+    while (i < bc1_data.len) : (i += 8) {
+        bc1_data[i + 0] = 0xFF;
+        bc1_data[i + 1] = 0xFF;
+    }
 
-    // Encode with 4 chunks.
     const chunked = try test_support.createChunkedFrame(testing.allocator, &bc1_data, 4, HapTextureFormat_RGB_DXT1, HapCompressorSnappy);
     defer testing.allocator.free(chunked);
-    try testing.expect(chunked.len > 0);
+    try testing.expectEqual(@as(u32, 4), try hap_decode.frameTextureChunkCount(chunked, 0));
 
-    var tex_format: c_uint = 0;
-    var bytes_used: c_ulong = 0;
-    var output: [4096]u8 = undefined;
+    var output: hap_frame.DecodedFrame = .{};
+    defer output.deinit(testing.allocator);
 
-    callback_invocation_count = 0;
-
-    const result = HapDecode(
-        chunked.ptr,
-        @intCast(chunked.len),
-        0,
-        trackingCallback,
-        null,
-        &output,
-        @intCast(output.len),
-        &bytes_used,
-        &tex_format,
-    );
-
-    try testing.expectEqual(decoder.HapResult_No_Error, result);
-
-    // The callback MUST have been invoked exactly once for a multi-chunk frame.
-    try testing.expectEqual(@as(u32, 1), callback_invocation_count);
+    try decoder.decode(testing.allocator, chunked, &output);
+    try testing.expectEqual(@as(usize, 1), output.textures.items.len);
+    try testing.expectEqualSlices(u8, &bc1_data, output.textures.items[0].data.items);
 }
