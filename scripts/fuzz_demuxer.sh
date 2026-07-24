@@ -11,7 +11,7 @@
 #
 #   1. zig's own coverage-guided engine (`zig build test --fuzz=<limit>`).
 #      As of zig 0.16.0 this does NOT link for this project: `-ffuzz`
-#      instruments the vendored C sources (hap.c, minimp4.c, snappy.cc)
+#      instruments the vendored C sources (minimp4.c, snappy.cc)
 #      with clang's classic `-fsanitize-coverage=trace-cmp` calls
 #      (__sanitizer_cov_trace_cmp*/_switch/_const_cmp*), and zig's
 #      from-scratch fuzzer runtime doesn't implement that ABI -- only the

@@ -6,7 +6,10 @@
 
 const std = @import("std");
 
-/// Hap texture format identifiers (subset of HapTextureFormat from hap.h).
+/// Hap texture format identifiers, matching the HapTextureFormat values
+/// from the Hap bitstream spec (GL_EXT_texture_compression_s3tc /
+/// GL_ARB_texture_compression_rgtc / GL_ARB_texture_compression_bptc
+/// constants).
 pub const HapTextureFormat = enum(u32) {
     rgb_dxt1 = 0x83F0,
     rgba_dxt5 = 0x83F3,

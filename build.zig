@@ -8,18 +8,16 @@ const default_godot_version = "4.6";
 
 const common_warn_flags = [_][]const u8{ "-Wall", "-Wextra", "-Wno-unused-parameter" };
 
-// Wires up the vendored C/C++ (hap, minimp4, snappy) that core.zig wraps
-// with hand-written `extern fn` declarations, shared between the shipped
-// core module and the test-only one (see build()'s `core_test_mod`).
+// Wires up the vendored C/C++ (minimp4, snappy) that core.zig wraps with
+// hand-written `extern fn` declarations, shared between the shipped core
+// module and the test-only one (see build()'s `core_test_mod`).
 fn addCoreCSources(b: *Build, mod: *Build.Module, target: Build.ResolvedTarget) void {
-    mod.addIncludePath(b.path("thirdparty/hap"));
     mod.addIncludePath(b.path("thirdparty/minimp4"));
     mod.addIncludePath(b.path("thirdparty/snappy"));
     mod.addIncludePath(b.path("thirdparty/snappy/snappy_config"));
 
     mod.addCSourceFiles(.{
         .files = &.{
-            "thirdparty/hap/hap.c",
             "thirdparty/minimp4/minimp4.c",
             "src/core/minimp4_shim.c",
         },

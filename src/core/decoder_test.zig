@@ -273,9 +273,9 @@ test "decoder rejects a frame with an unsupported compressor nibble" {
 // -----------------------------------------------------------------------
 // Multi-image top-level section builder (kHapSectionMultipleImages = 0x0D):
 // wraps N sub-sections (each already in buildRawFrame's [len][type][data]
-// shape) in a top-level header, matching the on-disk layout hap.c's
-// hap_get_section_at_index walks for HapM-style dual-texture frames. Local
-// to this test file -- decoder.zig never needs to construct one itself.
+// shape) in a top-level header, matching the on-disk layout hap_decode.zig's
+// sectionAtIndex walks for HapM-style dual-texture frames. Local to this
+// test file -- decoder.zig never needs to construct one itself.
 // -----------------------------------------------------------------------
 fn buildMultiImageFrame(allocator: std.mem.Allocator, sections: []const []const u8) ![]u8 {
     var total: usize = 0;
