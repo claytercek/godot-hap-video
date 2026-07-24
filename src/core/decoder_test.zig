@@ -14,6 +14,7 @@ const hap_frame = @import("hap_frame.zig");
 const mmap_reader = @import("mmap_reader.zig");
 const demuxer = @import("demuxer.zig");
 const decoder = @import("decoder.zig");
+const hap_decode = @import("hap_decode.zig");
 const test_support = @import("test_support.zig");
 
 const DecodedFrame = hap_frame.DecodedFrame;
@@ -24,23 +25,17 @@ const fixture_hap5 = "tests/fixtures/hap5.mov";
 const fixture_hapy = "tests/fixtures/hapy.mov";
 
 // -----------------------------------------------------------------------
-// hap.c externs needed only by this test file (HapDecode/
-// HapGetFrameTextureCount live in decoder.zig; HapGetFrameTextureCount is
-// re-exported from there rather than redeclared here). buildRawFrame/
-// createChunkedFrame (and the HapMaxEncodedLength/HapEncode externs they
-// need) live in test_support.zig, shared with concurrency_test.zig.
+// Frame queries go through hap_decode's Zig API (frameTextureCount /
+// frameTextureChunkCount). buildRawFrame/createChunkedFrame (and the
+// HapMaxEncodedLength/HapEncode externs they need, which still drive the
+// vendored C encoder) live in test_support.zig, shared with
+// concurrency_test.zig. The constants below are the API texture-format /
+// compressor codes HapEncode expects.
 // -----------------------------------------------------------------------
 
 const HapTextureFormat_RGB_DXT1: c_uint = 0x83F0;
 const HapTextureFormat_YCoCg_DXT5: c_uint = 0x01;
 const HapCompressorSnappy: c_uint = 1;
-
-extern fn HapGetFrameTextureChunkCount(
-    input_buffer: ?*const anyopaque,
-    input_buffer_bytes: c_ulong,
-    index: c_uint,
-    chunk_count: *c_int,
-) c_uint;
 
 /// Decode frame 0 of a fixture .mov file. Propagates
 /// MmapReader.InitError.OpenFailed so callers can treat a missing fixture
@@ -117,15 +112,12 @@ test "decoder decodes multiple Hap1 BC1 blocks (2x2 grid)" {
     try testing.expectEqual(@as(usize, 32), output.textures.items[0].data.items.len); // 4 blocks x 8 bytes
 }
 
-test "decoder Hap1 frame reports a single texture via HapGetFrameTextureCount" {
+test "decoder Hap1 frame reports a single texture" {
     const bc1_block = [_]u8{0} ** 8;
     const frame = try test_support.buildRawFrame(testing.allocator, &bc1_block, 0xAB);
     defer testing.allocator.free(frame);
 
-    var tex_count: c_uint = 0;
-    const result = decoder.HapGetFrameTextureCount(frame.ptr, @intCast(frame.len), &tex_count);
-    try testing.expectEqual(decoder.HapResult_No_Error, result);
-    try testing.expectEqual(@as(c_uint, 1), tex_count);
+    try testing.expectEqual(@as(u32, 1), try hap_decode.frameTextureCount(frame));
 }
 
 // -----------------------------------------------------------------------
@@ -141,15 +133,12 @@ test "decoder decodes a single Hap5 BC3 block byte-identical to input" {
     try expectDecodesTo(0xAE, &bc3_block, .rgba_dxt5);
 }
 
-test "decoder Hap5 frame reports a single texture via HapGetFrameTextureCount" {
+test "decoder Hap5 frame reports a single texture" {
     const bc3_block = [_]u8{0} ** 16;
     const frame = try test_support.buildRawFrame(testing.allocator, &bc3_block, 0xAE);
     defer testing.allocator.free(frame);
 
-    var tex_count: c_uint = 0;
-    const result = decoder.HapGetFrameTextureCount(frame.ptr, @intCast(frame.len), &tex_count);
-    try testing.expectEqual(decoder.HapResult_No_Error, result);
-    try testing.expectEqual(@as(c_uint, 1), tex_count);
+    try testing.expectEqual(@as(u32, 1), try hap_decode.frameTextureCount(frame));
 }
 
 // -----------------------------------------------------------------------
@@ -164,15 +153,12 @@ test "decoder decodes a single Hap7 BC7 block byte-identical to input" {
     try expectDecodesTo(0xAC, &bc7_block, .rgba_bptc_unorm);
 }
 
-test "decoder Hap7 frame reports a single texture via HapGetFrameTextureCount" {
+test "decoder Hap7 frame reports a single texture" {
     const bc7_block = [_]u8{0} ** 16;
     const frame = try test_support.buildRawFrame(testing.allocator, &bc7_block, 0xAC);
     defer testing.allocator.free(frame);
 
-    var tex_count: c_uint = 0;
-    const result = decoder.HapGetFrameTextureCount(frame.ptr, @intCast(frame.len), &tex_count);
-    try testing.expectEqual(decoder.HapResult_No_Error, result);
-    try testing.expectEqual(@as(c_uint, 1), tex_count);
+    try testing.expectEqual(@as(u32, 1), try hap_decode.frameTextureCount(frame));
 }
 
 // -----------------------------------------------------------------------
@@ -338,10 +324,7 @@ test "decoder leaves output empty when a later texture in a multi-image frame is
     const frame = try buildMultiImageFrame(testing.allocator, &.{ sub0, sub1 });
     defer testing.allocator.free(frame);
 
-    var tex_count: c_uint = 0;
-    const cc_result = decoder.HapGetFrameTextureCount(frame.ptr, @intCast(frame.len), &tex_count);
-    try testing.expectEqual(decoder.HapResult_No_Error, cc_result);
-    try testing.expectEqual(@as(c_uint, 2), tex_count);
+    try testing.expectEqual(@as(u32, 2), try hap_decode.frameTextureCount(frame));
 
     var output: DecodedFrame = .{};
     defer output.deinit(testing.allocator);
@@ -373,10 +356,7 @@ test "decoder dual-texture (HapM-style) frame decodes each texture into its own 
     const frame = try buildMultiImageFrame(testing.allocator, &.{ sub0, sub1 });
     defer testing.allocator.free(frame);
 
-    var tex_count: c_uint = 0;
-    const cc_result = decoder.HapGetFrameTextureCount(frame.ptr, @intCast(frame.len), &tex_count);
-    try testing.expectEqual(decoder.HapResult_No_Error, cc_result);
-    try testing.expectEqual(@as(c_uint, 2), tex_count);
+    try testing.expectEqual(@as(u32, 2), try hap_decode.frameTextureCount(frame));
 
     var output: DecodedFrame = .{};
     defer output.deinit(testing.allocator);
@@ -496,10 +476,7 @@ test "decoder chunked BC1 (Hap1) decode is byte-identical to unchunked" {
     try testing.expect(chunked.len >= 4);
     try testing.expectEqual(@as(u8, 0xCB), chunked[3]);
 
-    var chunk_count: c_int = 0;
-    const cc_result = HapGetFrameTextureChunkCount(chunked.ptr, @intCast(chunked.len), 0, &chunk_count);
-    try testing.expectEqual(decoder.HapResult_No_Error, cc_result);
-    try testing.expectEqual(@as(c_int, 4), chunk_count);
+    try testing.expectEqual(@as(u32, 4), try hap_decode.frameTextureChunkCount(chunked, 0));
 
     var out_unchunked: DecodedFrame = .{};
     defer out_unchunked.deinit(testing.allocator);
@@ -543,10 +520,7 @@ test "decoder chunked HapY (YCoCg-DXT5) decode is byte-identical to unchunked" {
     try testing.expect(chunked.len >= 4);
     try testing.expectEqual(@as(u8, 0xCF), chunked[3]);
 
-    var chunk_count: c_int = 0;
-    const cc_result = HapGetFrameTextureChunkCount(chunked.ptr, @intCast(chunked.len), 0, &chunk_count);
-    try testing.expectEqual(decoder.HapResult_No_Error, cc_result);
-    try testing.expect(chunk_count >= 2);
+    try testing.expect(try hap_decode.frameTextureChunkCount(chunked, 0) >= 2);
 
     var out_unchunked: DecodedFrame = .{};
     defer out_unchunked.deinit(testing.allocator);
