@@ -37,4 +37,5 @@ test {
     _ = @import("decode_scheduler_test.zig");
     _ = @import("fuzz_regressions_test.zig");
     _ = @import("demuxer_fuzz.zig");
+    _ = @import("hap_decode_fuzz.zig");
 }
