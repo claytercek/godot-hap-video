@@ -1,11 +1,10 @@
 //! thread_pool.zig
 //!
-//! The "inner" thread pool implementing hap.c's callback-based parallel
-//! chunk-decode contract (`HapDecodeCallback` / `HapDecodeWorkFunction`, see
-//! thirdparty/hap/hap.h): `HapDecode` invokes the callback once per
-//! multi-chunk ("Complex" compressor) texture, handing it a work function to
-//! call once per chunk index; the callback must dispatch all `count` calls
-//! and return only once they are all complete.
+//! The "inner" thread pool used for parallel chunk decode of a single
+//! multi-chunk ("Complex" compressor) Hap texture: hap_decode.zig calls
+//! `InnerThreadPool.instance().execute()` directly with a work function to
+//! call once per chunk index, and `execute` returns only once every index
+//! has been dispatched and completed.
 //!
 //! Sizing: max(1, hardware_concurrency - kOuterWorkers), clamped to a
 //! minimum of 1. `kOuterWorkers` is imported from outer_thread_pool.zig's
@@ -32,16 +31,10 @@ const sync = @import("sync.zig");
 const Mutex = sync.Mutex;
 const Condition = sync.Condition;
 
-/// HapDecodeWorkFunction / HapDecodeCallback -- see thirdparty/hap/hap.h.
-/// Hand-declared (no @cImport, per project convention) with an explicit
-/// `.c` calling convention so they pass directly to `HapDecode`.
-pub const HapDecodeWorkFunction = *const fn (p: ?*anyopaque, index: c_uint) callconv(.c) void;
-pub const HapDecodeCallback = *const fn (
-    function: HapDecodeWorkFunction,
-    p: ?*anyopaque,
-    count: c_uint,
-    info: ?*anyopaque,
-) callconv(.c) void;
+/// Per-chunk work function signature: called once per chunk index by
+/// `execute` (see below), on whichever thread -- pool worker or the calling
+/// thread itself -- that index was partitioned to.
+pub const HapDecodeWorkFunction = *const fn (p: ?*anyopaque, index: c_uint) void;
 
 /// Matches OuterThreadPool.kDefaultWorkers (see outer_thread_pool.zig,
 /// which owns this constant).
@@ -55,7 +48,7 @@ const Partition = struct {
 
 /// A thread pool for parallel chunk decode within a single frame.
 ///
-/// See the module docs for the HapDecodeCallback contract and sizing rules.
+/// See the module docs for the dispatch contract and sizing rules.
 pub const InnerThreadPool = struct {
     allocator: std.mem.Allocator,
 
@@ -249,21 +242,6 @@ pub fn instance() *InnerThreadPool {
     return Singleton.get();
 }
 
-/// HapDecodeCallback-compatible function that uses the shared
-/// InnerThreadPool singleton. Pass this as the callback argument to
-/// HapDecode. The `info` argument is unused. The callback is invoked only
-/// for multi-chunk textures (Complex compressor) and returns only when all
-/// chunks are decoded.
-pub fn hapInnerDecodeCallback(
-    function: HapDecodeWorkFunction,
-    p: ?*anyopaque,
-    count: c_uint,
-    info: ?*anyopaque,
-) callconv(.c) void {
-    _ = info;
-    instance().execute(function, p, count);
-}
-
 // -----------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------
@@ -289,7 +267,7 @@ test "InnerThreadPool.execute calls the work function directly for count <= 1" {
     var seen: u32 = 0;
 
     const Ctx = struct {
-        fn work(p: ?*anyopaque, index: c_uint) callconv(.c) void {
+        fn work(p: ?*anyopaque, index: c_uint) void {
             const counter: *u32 = @ptrCast(@alignCast(p.?));
             counter.* += 1;
             try_expect_zero_index(index);
@@ -314,7 +292,7 @@ test "InnerThreadPool.execute dispatches every index exactly once across workers
     var seen = [_]std.atomic.Value(u32){std.atomic.Value(u32).init(0)} ** count;
 
     const Ctx = struct {
-        fn work(p: ?*anyopaque, index: c_uint) callconv(.c) void {
+        fn work(p: ?*anyopaque, index: c_uint) void {
             const arr: [*]std.atomic.Value(u32) = @ptrCast(@alignCast(p.?));
             _ = arr[index].fetchAdd(1, .monotonic);
         }
@@ -335,7 +313,7 @@ test "InnerThreadPool.execute can be called repeatedly (batch counter advances)"
     var totals = [_]std.atomic.Value(u32){std.atomic.Value(u32).init(0)} ** count;
 
     const Ctx = struct {
-        fn work(p: ?*anyopaque, index: c_uint) callconv(.c) void {
+        fn work(p: ?*anyopaque, index: c_uint) void {
             const arr: [*]std.atomic.Value(u32) = @ptrCast(@alignCast(p.?));
             _ = arr[index].fetchAdd(1, .monotonic);
         }
@@ -354,22 +332,4 @@ test "InnerThreadPool.execute can be called repeatedly (batch counter advances)"
 test "InnerThreadPool singleton instance() is reachable and sized at least 1" {
     const pool = instance();
     try testing.expect(pool.workerCount() >= 1);
-}
-
-test "hapInnerDecodeCallback drives the singleton pool for a multi-chunk batch" {
-    const count: u32 = 8;
-    var seen = [_]std.atomic.Value(u32){std.atomic.Value(u32).init(0)} ** count;
-
-    const Ctx = struct {
-        fn work(p: ?*anyopaque, index: c_uint) callconv(.c) void {
-            const arr: [*]std.atomic.Value(u32) = @ptrCast(@alignCast(p.?));
-            _ = arr[index].fetchAdd(1, .monotonic);
-        }
-    };
-
-    hapInnerDecodeCallback(Ctx.work, &seen, count, null);
-
-    for (&seen) |*v| {
-        try testing.expectEqual(@as(u32, 1), v.load(.monotonic));
-    }
 }

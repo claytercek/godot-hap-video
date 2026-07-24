@@ -298,7 +298,7 @@ const ChunkBatch = struct {
 };
 
 /// InnerThreadPool work function: decode chunk `index` of the batch.
-fn decodeChunkWorker(p: ?*anyopaque, index: c_uint) callconv(.c) void {
+fn decodeChunkWorker(p: ?*anyopaque, index: c_uint) void {
     const batch: *ChunkBatch = @ptrCast(@alignCast(p.?));
     const job = &batch.jobs[index];
     switch (job.compressor) {
