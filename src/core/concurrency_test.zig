@@ -43,14 +43,9 @@ fn ensureOneTexture(list: *std.ArrayListUnmanaged(hap_frame.DecodedTexture), all
 }
 
 // -----------------------------------------------------------------------
-// Frame builders (createChunkedFrame and its HapMaxEncodedLength/HapEncode
-// externs) live in test_support.zig, shared with decoder_test.zig. The
-// constants below are the API texture-format / compressor codes HapEncode
-// expects.
+// Frame builders (createChunkedFrame) live in test_support.zig, shared with
+// decoder_test.zig.
 // -----------------------------------------------------------------------
-
-const HapTextureFormat_RGB_DXT1: c_uint = 0x83F0;
-const HapCompressorSnappy: c_uint = 1;
 
 // -----------------------------------------------------------------------
 // RetireRing
@@ -566,7 +561,7 @@ test "thread pool large count" {
 
 test "single-chunk frame decodes inline" {
     const bc1_data = [_]u8{ 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-    const frame = try test_support.createChunkedFrame(testing.allocator, &bc1_data, 1, HapTextureFormat_RGB_DXT1, HapCompressorSnappy);
+    const frame = try test_support.createChunkedFrame(testing.allocator, &bc1_data, 1, .rgb_dxt1);
     defer testing.allocator.free(frame);
 
     var output: hap_frame.DecodedFrame = .{};
@@ -578,9 +573,9 @@ test "single-chunk frame decodes inline" {
 }
 
 test "multi-chunk frame decodes via the inner pool" {
-    // 1024 bytes = 128 BC1 blocks of a uniform (highly compressible) white
-    // pattern, so HapEncode keeps all four requested chunks rather than
-    // collapsing to one. Decoding it drives the shared InnerThreadPool.
+    // 1024 bytes = 128 BC1 blocks; the builder always emits exactly the
+    // requested chunk count, so this reliably drives the shared
+    // InnerThreadPool with 4 chunks.
     var bc1_data: [1024]u8 = [_]u8{0} ** 1024;
     var i: usize = 0;
     while (i < bc1_data.len) : (i += 8) {
@@ -588,7 +583,7 @@ test "multi-chunk frame decodes via the inner pool" {
         bc1_data[i + 1] = 0xFF;
     }
 
-    const chunked = try test_support.createChunkedFrame(testing.allocator, &bc1_data, 4, HapTextureFormat_RGB_DXT1, HapCompressorSnappy);
+    const chunked = try test_support.createChunkedFrame(testing.allocator, &bc1_data, 4, .rgb_dxt1);
     defer testing.allocator.free(chunked);
     try testing.expectEqual(@as(u32, 4), try hap_decode.frameTextureChunkCount(chunked, 0));
 
