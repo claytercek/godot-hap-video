@@ -313,10 +313,10 @@ test "decoder leaves output empty when a later texture in a multi-image frame is
     const sub0 = try test_support.buildRawFrame(testing.allocator, &bc1_block, 0xAB);
     defer testing.allocator.free(sub0);
 
-    // Texture 1: type byte 0x00 -- invalid format nibble, fails
-    // HapGetFrameTextureFormat after texture 0 has already been decoded
-    // into output. This is the mid-loop failure the "output left empty on
-    // failure" contract exists for.
+    // Texture 1: type byte 0x00 -- invalid format nibble, so decodeTexture
+    // rejects it after texture 0 has already been decoded into output. This
+    // is the mid-loop failure the "output left empty on failure" contract
+    // exists for.
     const dummy = [_]u8{0} ** 16;
     const sub1 = try test_support.buildRawFrame(testing.allocator, &dummy, 0x00);
     defer testing.allocator.free(sub1);
@@ -622,12 +622,12 @@ test "decoder Hap1 fixture frame0 matches the committed golden reference" {
 // Known limitation: no dedicated real-file test for HapM (dual-texture)
 // decoding. There is no committed hapm.mov fixture (tests/fixtures/
 // README.md documents it as conditional/optional), so the multi-texture
-// cases above only assert HapGetFrameTextureCount == 1 for Hap1/5/7,
-// never exercising the count == 2 path against a real HapEncode-produced
-// HapM frame. The synthetic buildMultiImageFrame-based test above
+// cases above only assert frameTextureCount == 1 for Hap1/5/7, never
+// exercising the count == 2 path against a real HapEncode-produced HapM
+// frame. The synthetic buildMultiImageFrame-based test above
 // ("dual-texture (HapM-style) frame decodes each texture into its own
 // non-aliased buffer") does exercise the count == 2 path and the
 // multi-texture index fix (decoder.zig's loop, see its doc comment) using
-// the same kHapSectionMultipleImages wrapping hap.c expects, just not with
+// the same multi-image section wrapping the format expects, just not with
 // HapEncode's real YCoCg_DXT5 + A_RGTC1 texture combination.
 // -----------------------------------------------------------------------
