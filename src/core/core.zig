@@ -8,6 +8,7 @@ pub const hap_frame = @import("hap_frame.zig");
 pub const mmap_reader = @import("mmap_reader.zig");
 pub const demuxer = @import("demuxer.zig");
 pub const thread_pool = @import("thread_pool.zig");
+pub const hap_decode = @import("hap_decode.zig");
 pub const decoder = @import("decoder.zig");
 pub const outer_thread_pool = @import("outer_thread_pool.zig");
 pub const pool_lifecycle = @import("pool_lifecycle.zig");
@@ -22,6 +23,7 @@ test {
     _ = demuxer;
     _ = @import("demuxer_test.zig");
     _ = thread_pool;
+    _ = hap_decode;
     _ = decoder;
     _ = @import("decoder_test.zig");
     _ = outer_thread_pool;
