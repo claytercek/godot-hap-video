@@ -1,22 +1,23 @@
 //! decoder.zig
 //!
 //! Decodes a single Hap frame from its compressed bytes into raw texture
-//! data. Wraps the Vidvox hap.c decoder (HapDecode, HapGetFrameTextureCount,
-//! HapGetFrameTextureFormat) with correct multi-texture handling (fixing the
-//! reference Unity plugin's hardcoded index=0 bug: HapM frames carry two
-//! textures, and each must be requested/decoded with *its own* index --
-//! looping `i` through both HapGetFrameTextureFormat and HapDecode below,
-//! rather than hardcoding 0, is that fix).
+//! data. Delegates parsing and per-texture decompression to hap_decode.zig
+//! (a clean-room Zig implementation of the Hap bitstream), with correct
+//! multi-texture handling (fixing the reference Unity plugin's hardcoded
+//! index=0 bug: HapM frames carry two textures, and each must be decoded
+//! with *its own* index -- looping `i` through decodeTexture below, rather
+//! than hardcoding 0, is that fix).
 //!
-//! Chunked frames (Complex compressor) are decoded in parallel using the
-//! shared InnerThreadPool (thread_pool.zig), which auto-derives its thread
-//! count from hardware_concurrency per that module's formula. The
-//! HapDecode callback is invoked once per multi-chunk texture and returns
-//! only when all chunks are complete. Single-chunk textures bypass the
-//! callback entirely (see InnerThreadPool.execute's count <= 1 fast path).
+//! Chunked frames (Complex compressor) are decoded in parallel by
+//! hap_decode via the shared InnerThreadPool (thread_pool.zig), which
+//! auto-derives its thread count from hardware_concurrency per that
+//! module's formula. Single-chunk and non-chunked textures decode inline
+//! on the calling thread.
 //!
 //! The decoder does not copy the caller's input -- it decodes directly from
-//! the slice passed in (typically a slice of the mmap region).
+//! the slice passed in (typically a slice of the mmap region). Each
+//! texture's output buffer is sized to the exact decoded length up front,
+//! computed by hap_decode during parse.
 //!
 //! `decode` returns `error{InvalidFrame,OutOfMemory}!void`:
 //! `error.InvalidFrame` means the input is not a valid/supported Hap frame,
@@ -27,54 +28,19 @@
 const std = @import("std");
 
 const hap_frame = @import("hap_frame.zig");
-const thread_pool = @import("thread_pool.zig");
+const hap_decode = @import("hap_decode.zig");
 
 const DecodedFrame = hap_frame.DecodedFrame;
-const HapTextureFormat = hap_frame.HapTextureFormat;
 
-/// HapResult -- see thirdparty/hap/hap.h.
+/// HapResult_No_Error -- the C hap.c success code, kept for the test-only
+/// HapEncode path (test_support.zig/concurrency_test.zig) that still drives
+/// the vendored encoder while it builds synthetic chunked frames.
 pub const HapResult_No_Error: c_uint = 0;
-const HapResult_Buffer_Too_Small: c_uint = 2;
 
 /// HapM (dual-texture) frames carry exactly two textures -- e.g.
-/// YCoCg_DXT5 + A_RGTC1 for the combined-alpha case documented in
-/// thirdparty/hap/hap.h -- so a valid frame never has more than this many.
-const max_texture_count: c_uint = 2;
-
-/// Output-buffer growth factor applied both to the initial size guess
-/// (from the compressed input size) and to hap.c's reported `bytes_used`
-/// on a too-small retry. 1.5x is a safety margin above the worst case
-/// (BC-compressed data can be at most the size of the uncompressed input).
-const buffer_growth_factor: f64 = 1.5;
-
-/// Floor for the initial output-buffer guess, so tiny frames don't churn
-/// through repeated grow-and-retry cycles.
-const min_output_buffer_bytes: usize = 1024 * 1024;
-
-pub extern fn HapGetFrameTextureCount(
-    input_buffer: ?*const anyopaque,
-    input_buffer_bytes: c_ulong,
-    output_texture_count: *c_uint,
-) c_uint;
-
-extern fn HapGetFrameTextureFormat(
-    input_buffer: ?*const anyopaque,
-    input_buffer_bytes: c_ulong,
-    index: c_uint,
-    output_buffer_texture_format: *c_uint,
-) c_uint;
-
-extern fn HapDecode(
-    input_buffer: ?*const anyopaque,
-    input_buffer_bytes: c_ulong,
-    index: c_uint,
-    callback: ?thread_pool.HapDecodeCallback,
-    info: ?*anyopaque,
-    output_buffer: ?*anyopaque,
-    output_buffer_bytes: c_ulong,
-    output_buffer_bytes_used: *c_ulong,
-    output_buffer_texture_format: *c_uint,
-) c_uint;
+/// YCoCg_DXT5 + A_RGTC1 for the combined-alpha case -- so a valid frame
+/// never has more than this many.
+const max_texture_count: u32 = 2;
 
 /// Frees every texture `output` currently holds and resets it to empty,
 /// without touching its outer array's capacity. The sole cleanup primitive
@@ -98,78 +64,25 @@ pub fn decode(allocator: std.mem.Allocator, input: []const u8, output: *DecodedF
     clearOutput(output, allocator);
 
     // Also empty `output` on error paths (e.g. allocation failure),
-    // not just on `false` returns -- callers shouldn't have to
+    // not just on rejected frames -- callers shouldn't have to
     // distinguish "rejected frame" from "ran out of memory" to know
     // whether output is trustworthy.
     errdefer clearOutput(output, allocator);
 
-    // Determine number of textures in this frame.
-    var texture_count: c_uint = 0;
-    var result = HapGetFrameTextureCount(input.ptr, @intCast(input.len), &texture_count);
-    if (result != HapResult_No_Error or texture_count == 0 or texture_count > max_texture_count) {
+    const texture_count = try hap_decode.frameTextureCount(input);
+    if (texture_count == 0 or texture_count > max_texture_count) {
         return error.InvalidFrame;
     }
 
     try output.textures.resize(allocator, texture_count);
     for (output.textures.items) |*tex| tex.* = .{};
 
-    var i: c_uint = 0;
+    var i: u32 = 0;
     while (i < texture_count) : (i += 1) {
-        // Peek at the texture format to determine the output buffer
-        // size. Multi-texture fix: pass `i`, not a hardcoded 0.
-        var texture_format: c_uint = 0;
-        result = HapGetFrameTextureFormat(input.ptr, @intCast(input.len), i, &texture_format);
-        if (result != HapResult_No_Error) {
-            return error.InvalidFrame;
-        }
-
-        const tex = &output.textures.items[@intCast(i)];
-
-        // Allocate a generous output buffer. We grow it as needed. The
-        // maximum size for BC-compressed data is the full input size
-        // (uncompressed worst case). For safety, use input_size *
-        // buffer_growth_factor.
-        var max_size: usize = @intFromFloat(@as(f64, @floatFromInt(input.len)) * buffer_growth_factor);
-        if (max_size < min_output_buffer_bytes) max_size = min_output_buffer_bytes;
-        if (tex.data.items.len < max_size) {
-            try tex.data.resize(allocator, max_size);
-        }
-
-        // Decode directly into tex.data. If it's too small, hap.c
-        // reports the exact bytes needed via bytes_used; grow to 1.5x
-        // that and retry once.
-        var bytes_used: c_ulong = 0;
-        var decoded = false;
-        var attempt: u32 = 0;
-        while (attempt < 2) : (attempt += 1) {
-            result = HapDecode(
-                input.ptr,
-                @intCast(input.len),
-                i,
-                thread_pool.hapInnerDecodeCallback,
-                null,
-                tex.data.items.ptr,
-                @intCast(tex.data.items.len),
-                &bytes_used,
-                &texture_format,
-            );
-            if (result == HapResult_No_Error) {
-                decoded = true;
-                break;
-            }
-            if (result != HapResult_Buffer_Too_Small) {
-                return error.InvalidFrame;
-            }
-            const grown: usize = @intFromFloat(@as(f64, @floatFromInt(bytes_used)) * buffer_growth_factor);
-            try tex.data.resize(allocator, grown);
-        }
-        if (!decoded) {
-            return error.InvalidFrame;
-        }
-
-        // Shrink to the actual decoded size (no copy -- just truncates
-        // .items.len).
-        try tex.data.resize(allocator, bytes_used);
-        tex.format = @enumFromInt(texture_format);
+        // Multi-texture fix: decode texture `i`, not a hardcoded 0.
+        // decodeTexture sizes tex.data to the exact decoded length and
+        // returns the parsed texture format.
+        const tex = &output.textures.items[i];
+        tex.format = try hap_decode.decodeTexture(allocator, input, i, &tex.data);
     }
 }
