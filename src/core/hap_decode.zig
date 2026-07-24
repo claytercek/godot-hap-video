@@ -238,6 +238,11 @@ fn parseComplexInstructions(payload: []const u8) Error!ComplexInstructions {
         const sub = try readSectionHeader(body[offset..]);
         const data = body[offset + sub.header_len ..][0..sub.size];
 
+        // `@intCast` to u32 below cannot wrap: `sub.size` is bounded by
+        // `readSectionHeader` to fit within the enclosing buffer, which is
+        // ultimately a slice of one MP4 sample (see demuxer.zig/hap_frame.zig
+        // `SampleEntry.size: u32`, sourced from minimp4's 32-bit stsz/stz2
+        // fields) -- so no section can be larger than u32 max to begin with.
         var section_chunk_count: u32 = 0;
         switch (sub.type) {
             section_chunk_compressor_table => {
