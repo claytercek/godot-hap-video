@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Bounded-time local fuzz run against the Demuxer.open() path
-# (src/core/demuxer_fuzz.zig).
+# (src/core/demuxer_fuzz.zig). Since this just runs the core test binary,
+# it also drives decoder.decode()'s bounded loop (src/core/hap_decode_fuzz.zig)
+# for the same HAP_FUZZ_SECONDS window in the same invocation -- one script
+# fuzzes both untrusted-structure entry points.
 #
 # Usage: scripts/fuzz_demuxer.sh [seconds]
 #
@@ -75,4 +78,4 @@ echo "Running HAP_FUZZ_SECONDS=${DURATION} zig build test ..." | tee -a "$LOG_FI
 HAP_FUZZ_SECONDS="$DURATION" zig build test -Dtest-optimize=ReleaseFast --summary all 2>&1 | tee -a "$LOG_FILE"
 
 echo "Done. Log: $LOG_FILE"
-echo "Any crash/leak/hang above: copy the offending bytes into tests/fixtures/fuzz_regressions/ and add coverage in fuzz_regressions_test.zig."
+echo "Any crash/leak/hang above: copy the offending bytes into tests/fixtures/fuzz_regressions/ and add coverage in fuzz_regressions_test.zig (Demuxer.open) or hap_decode_fuzz.zig's decoder replay test (decoder.decode), whichever path found it."
