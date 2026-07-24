@@ -76,4 +76,15 @@ else
   echo "Run scripts/generate_hap7_fixture.py manually."
 fi
 
+echo "Generating hapm fixture (Hap Q Alpha / dual texture)..."
+# HapM cannot be encoded by ffmpeg either; a Python script writes a valid
+# MOV with a HapM stsd entry and a real Multi-Image frame (YCoCg DXT5 +
+# A_RGTC1 sections). See tests/fixtures/README.md.
+if command -v python3 >/dev/null 2>&1; then
+  python3 "$(dirname "$0")/generate_hapm_fixture.py" "$OUTDIR/hapm.mov" "$WIDTH" "$HEIGHT"
+else
+  echo "WARNING: python3 not found; skipping hapm.mov generation."
+  echo "Run scripts/generate_hapm_fixture.py manually."
+fi
+
 echo "Done. Fixtures in: $OUTDIR"
