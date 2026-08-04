@@ -95,6 +95,23 @@ pub fn build(b: *Build) !void {
     const test_step = b.step("test", "Run core unit tests (no Godot needed)");
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
 
+    // --- Bench: standalone open/close/decode benchmark, no Godot needed.
+    // Reuses core_mod (not core_test_mod) so numbers reflect the same
+    // ReleaseFast build that ships in the extension. ---
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("src/bench/bench.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "core", .module = core_mod },
+        },
+    });
+
+    const bench_exe = b.addExecutable(.{ .name = "bench", .root_module = bench_mod });
+    const run_bench = b.addRunArtifact(bench_exe);
+    if (b.args) |args| run_bench.addArgs(args);
+    b.step("bench", "Run decode/open/close benchmarks").dependOn(&run_bench.step);
+
     // --- Godot extension: gdzig glue. ---
     // Explicit path > explicit version > downloaded default version.
     const gdzig_dep = if (opt_godot_path) |path| b.dependency("gdzig", .{
