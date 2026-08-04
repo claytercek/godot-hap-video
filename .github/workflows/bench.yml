@@ -1,0 +1,56 @@
+name: bench
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  bench:
+    name: Benchmark
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Run benchmarks
+        run: zig build bench -- --json bench-results.json
+
+      - name: Restore benchmark baseline cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ./bench-cache
+          key: benchmark-main-${{ github.sha }}
+          restore-keys: |
+            benchmark-main-
+
+      - name: Compare benchmark results
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: hap-video bench
+          tool: customSmallerIsBetter
+          output-file-path: bench-results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          external-data-json-path: ./bench-cache/benchmark-data.json
+          comment-always: ${{ github.event_name == 'pull_request' }}
+          alert-threshold: "150%"
+
+      - name: Save benchmark baseline cache
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: ./bench-cache
+          key: benchmark-main-${{ github.sha }}
