@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.0](https://github.com/claytercek/godot-hap-video/compare/v0.2.0...v0.3.0) (2026-08-04)
+
+
+### Features
+
+* **bench:** add `zig build bench` harness ([1ef9f69](https://github.com/claytercek/godot-hap-video/commit/1ef9f69afa4d5444c11051b86ca98e19b79a2c5c))
+* **core:** add clean-room Zig Hap frame decoder ([49ee3dd](https://github.com/claytercek/godot-hap-video/commit/49ee3dd60d8dc421098c9059d0f54e8f11891fe5))
+
+
+### Bug Fixes
+
+* **core:** open videos larger than 4 GB ([8a25038](https://github.com/claytercek/godot-hap-video/commit/8a25038faf6be91953d86811aafeb23ede147952))
+
+
+### Refactoring
+
+* **core:** decode via Zig hap_decode, drop C decode externs ([2c2dbfa](https://github.com/claytercek/godot-hap-video/commit/2c2dbfa248b8664bb5118af25f640a64586712f5))
+* **core:** delete unused hap.c-callback machinery in thread_pool ([9289341](https://github.com/claytercek/godot-hap-video/commit/9289341aa5276f1a40c481cf5191981d425da698))
+
 ## [0.2.0](https://github.com/claytercek/godot-hap-video/compare/v0.1.0...v0.2.0) (2026-07-23)
 
 
