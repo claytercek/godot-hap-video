@@ -62,6 +62,7 @@ confirm upstream has since fixed the same issue).
 | `fc098ce` | `thirdparty/minimp4/minimp4.h` | Widen `count * elemsize` malloc-size expressions to 64-bit before multiplying, so overflow can't wrap the size below `minimp4_bounded_malloc`'s check and under-allocate a buffer the parser then writes past. |
 | `74b9d08` | `thirdparty/minimp4/minimp4.h` | Guard `MP4D_frame_offset` against a chunk/sample count being set without its matching array being allocated (can happen when a malformed file's second, oversized `stco`/`stsz` box hits an out-of-memory path after the first allocation was freed). |
 | `5965126` | `thirdparty/minimp4/minimp4.h` | Bail out of `BOX_ctts` once its declared entry count runs past the box's actual payload, instead of reading zero-padding forever — a file could otherwise claim ~4 billion entries in a few bytes on disk. |
+| `a817983` | `thirdparty/minimp4/minimp4.h` | Fix upstream's `MP4D_64BIT_SUPPORTED` / `MINIMP4_ALLOW_64BIT` macro mixup: the 64-bit box-header and `co64` chunk-offset paths were gated on the former, which nothing defines, so every file over 4 GB was rejected as "not an MP4" despite 64-bit support being enabled. Regression-tested by the synthesized sparse >4 GB fixture in `src/core/demuxer_test.zig`. |
 
 The `2125503` patch (a UBSan fix to `thirdparty/hap/hap.c`'s callback
 signature) no longer applies -- it was removed along with the rest of
