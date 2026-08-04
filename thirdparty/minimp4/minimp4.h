@@ -2744,7 +2744,10 @@ broken_android_meta_hack:
                 TRACE(("\n64-bit chunk encountered"));
 
                 box_bytes = minimp4_read(mp4, 4, &eof_flag);
-#if MP4D_64BIT_SUPPORTED
+// Upstream gates 64-bit support on MP4D_64BIT_SUPPORTED here, a macro
+// nothing ever defines (the working switch is MINIMP4_ALLOW_64BIT), so
+// >4 GB boxes were rejected even with 64-bit support enabled.
+#if MINIMP4_ALLOW_64BIT
                 box_bytes <<= 32;
                 box_bytes |= minimp4_read(mp4, 4, &eof_flag);
 #else
@@ -3039,7 +3042,10 @@ broken_android_meta_hack:
                 tr->chunk_offset[i] = READ(4);
                 if (box_name == BOX_co64)
                 {
-#if !MP4D_64BIT_SUPPORTED
+// Same MP4D_64BIT_SUPPORTED / MINIMP4_ALLOW_64BIT mixup as in the box
+// header parser above: with the dead macro this rejected any co64 chunk
+// offset past 4 GB.
+#if !MINIMP4_ALLOW_64BIT
                     if (tr->chunk_offset[i])
                     {
                         ERROR("UNSUPPORTED FEATURE: 64-bit chunk_offset not supported!");

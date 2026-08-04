@@ -12,7 +12,14 @@
 //! documents the same Zig-0.16 rationale for wrapping std.Io here).
 
 const std = @import("std");
+const testing = std.testing;
+
 const hap_frame = @import("hap_frame.zig");
+const mmap_reader = @import("mmap_reader.zig");
+const demuxer_mod = @import("demuxer.zig");
+
+const MmapReader = mmap_reader.MmapReader;
+const Demuxer = demuxer_mod.Demuxer;
 
 pub fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
@@ -229,4 +236,46 @@ pub fn createChunkedFrame(
 
     const type_byte = (compressor_complex << 4) | formatNibble(format);
     return buildSection(allocator, type_byte, payload.items);
+}
+
+// -----------------------------------------------------------------------
+// Fixture helpers.
+//
+// Fixture paths are relative to the repo root, which is the test working
+// directory (matches mmap_reader.zig's fixture tests). A missing fixture
+// skips the test rather than failing it, so a stripped checkout still runs
+// the synthetic suites.
+// -----------------------------------------------------------------------
+
+/// An open fixture: the mapped file plus the demuxer that parsed it.
+pub const Fixture = struct {
+    reader: MmapReader,
+    demuxer: Demuxer,
+
+    pub fn deinit(self: *Fixture) void {
+        self.demuxer.deinit(testing.allocator);
+        self.reader.deinit();
+    }
+
+    /// Compressed sample bytes of frame `index`.
+    pub fn sample(self: *const Fixture, index: u32) ![]const u8 {
+        return self.demuxer.sampleData(&self.reader, index) orelse error.TestUnexpectedResult;
+    }
+};
+
+/// Map and demux the fixture at `path`. A missing file yields
+/// `error.SkipZigTest`, which a whole test can propagate and a per-case loop
+/// can catch to skip just that case.
+pub fn openFixture(path: []const u8) !Fixture {
+    var reader = MmapReader.init(path) catch |err| switch (err) {
+        error.OpenFailed => return error.SkipZigTest,
+        else => return err,
+    };
+    errdefer reader.deinit();
+
+    var dem: Demuxer = .{};
+    errdefer dem.deinit(testing.allocator);
+    try dem.open(testing.allocator, &reader);
+
+    return .{ .reader = reader, .demuxer = dem };
 }
