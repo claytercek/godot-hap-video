@@ -60,7 +60,9 @@ const BoxHeader = struct {
     size: u64,
     fourcc: u32,
     data_pos: u64,
-    data_size: u32,
+    // u64, not u32: a >4 GB mdat box is routine for long Hap files, and its
+    // header passes through here during the top-level moov scan.
+    data_size: u64,
 };
 
 const fourcc_moov = FourCC.initChars('m', 'o', 'o', 'v').value;
@@ -104,7 +106,7 @@ fn readBoxHeader(file_data: []const u8, offset: u64) ?BoxHeader {
         .size = box_size,
         .fourcc = box_type,
         .data_pos = offset + header_size,
-        .data_size = @intCast(box_size - header_size),
+        .data_size = box_size - header_size,
     };
 }
 
