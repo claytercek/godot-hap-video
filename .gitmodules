@@ -1,4 +1,3 @@
 [submodule "vendor/gdzig"]
 	path = vendor/gdzig
-	url = https://github.com/claytercek/gdzig.git
-	branch = media-streams-fixes-0.16
+	url = https://github.com/gdzig/gdzig.git
