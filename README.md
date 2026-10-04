@@ -175,9 +175,11 @@ git clone --recurse-submodules <repository-url>
 cd godot-hap-video
 ```
 
-Use **Zig 0.17.0**. The core test suite does not need Godot:
+Install **Zig 0.17.0** directly from [Zig](https://ziglang.org/download/).
+The core test suite does not need Godot:
 
 ```bash
+zig version             # 0.17.0
 zig build test
 ```
 
@@ -187,15 +189,19 @@ and nullable-Ref ptrcall fixes previously carried by our fork. Its vendored
 Godot API and interface header let you build the extension and cross-compile
 without installing Godot.
 
-`run` and `smoke` need Godot 4.6 or newer. They use `-Dgodot-path`, then
-`GODOT_PATH`, then `godot` on `PATH`. Godot is no longer downloaded by the
-build, and `-Dgodot-version` is no longer supported:
+`run` and `smoke` need Godot 4.6 or newer. Install Godot separately
+(for example, with `gdvm`). These commands use
+`-Dgodot-path`, then `GODOT_PATH`, then `godot` on `PATH`. Godot is no longer
+downloaded by the build, and `-Dgodot-version` is no longer supported:
 
 ```bash
 zig build smoke -Dgodot-path=/path/to/godot
 # or
 GODOT_PATH=/path/to/godot zig build run
 ```
+
+If you use `gdvm`, point `GODOT_PATH` at the Godot executable it manages.
+The build does not pick a Godot version for you.
 
 The development build installs the library into `project/lib/` and uses
 `project/hap_video.gdextension`, which is separate from the release addon
