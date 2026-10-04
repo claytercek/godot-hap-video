@@ -17,6 +17,13 @@ addons/
 zig-out/
 zig-pkg/
 
+# Personal environment configuration and generated state
+/devenv.nix
+/devenv.yaml
+/devenv.lock
+/.devenv/
+/.direnv/
+
 # Compile commands
 compile_commands.json
 
