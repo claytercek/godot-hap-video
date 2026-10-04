@@ -24,8 +24,6 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
@@ -57,8 +55,6 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
@@ -89,8 +85,6 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
@@ -126,7 +120,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          submodules: recursive
       - uses: actions/download-artifact@v4
         with:
           pattern: hap-video-*
@@ -140,7 +133,6 @@ jobs:
           cp addon/hap_video.gdextension "$addon/"
           cp README.md LICENSE.md "$addon/"
           cp thirdparty/licenses/* "$addon/licenses/"
-          cp vendor/gdzig/LICENSE "$addon/licenses/LICENSE-gdzig.txt"
       - name: Verify addon completeness
         run: |
           addon="addon-out/addons/hap_video"

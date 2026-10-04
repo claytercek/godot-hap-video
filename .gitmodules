@@ -1,3 +1,0 @@
-[submodule "vendor/gdzig"]
-	path = vendor/gdzig
-	url = https://github.com/gdzig/gdzig.git

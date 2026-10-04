@@ -167,11 +167,10 @@ parallelism against chunk-level parallelism.
 
 ## Build from source
 
-Clone the repository with its submodules, because `vendor/gdzig` is a required
-local dependency:
+Clone the repository (no submodules required):
 
 ```bash
-git clone --recurse-submodules <repository-url>
+git clone <repository-url>
 cd godot-hap-video
 ```
 
@@ -183,9 +182,11 @@ zig version             # 0.17.0
 zig build test
 ```
 
-The gdzig submodule uses canonical upstream, pinned to
-`7e50fe4eeed6b6d6437e61706f25906f8a68eac7`. It includes the nullable-object
-and nullable-Ref ptrcall fixes previously carried by our fork. Its vendored
+`build.zig.zon` fetches canonical upstream gdzig directly, pinned by URL to
+`7e50fe4eeed6b6d6437e61706f25906f8a68eac7` and verified by its Zig
+package hash. The first build needs network access to fetch the dependency;
+subsequent builds use Zig's cache. This revision includes the nullable-object
+and nullable-Ref ptrcall fixes previously carried by our fork. Its bundled
 Godot API and interface header let you build the extension and cross-compile
 without installing Godot.
 
@@ -200,8 +201,14 @@ zig build smoke -Dgodot-path=/path/to/godot
 GODOT_PATH=/path/to/godot zig build run
 ```
 
-If you use `gdvm`, point `GODOT_PATH` at the Godot executable it manages.
-The build does not pick a Godot version for you.
+If you use `gdvm`, point `GODOT_PATH` at the Godot executable it manages,
+for example `export GODOT_PATH="$(gdvm show 4.7.1)"`. The build does not
+pick a Godot version for you. CI still tests both 4.6.3 and 4.7.1.
+
+To regenerate the media fixtures from the project root, run
+`bash scripts/generate_fixtures.sh`. This requires Python 3 and FFmpeg built
+with `--enable-libsnappy` for Hap encoding. The fixture files under
+`tests/fixtures/` are committed for tests.
 
 The development build installs the library into `project/lib/` and uses
 `project/hap_video.gdextension`, which is separate from the release addon
@@ -233,8 +240,8 @@ and the smoke test passes.
 | `project/` | Development demo, smoke scene, fixture MOV, and development manifest. |
 | `src/core/` | Godot-independent MOV demuxing, Hap decode, scheduling, and tests. |
 | `src/godot/` | GDExtension classes, resource loader, playback adapter, and GPU presenter. |
-| `thirdparty/` | Vendored Hap, minimp4, and Snappy sources and their license notices. |
-| `vendor/gdzig/` | Pinned GDExtension binding dependency. |
+| `thirdparty/` | Vendored Hap, minimp4, and Snappy sources, plus third-party license notices (including gdzig). |
+| `build.zig.zon` | Pinned upstream gdzig GDExtension binding dependency. |
 | `tests/fixtures/` | Media fixtures and notes about their provenance. |
 
 ## License

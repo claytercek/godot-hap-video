@@ -2,8 +2,7 @@
 # Generate Hap video test fixtures.
 #
 # Requires ffmpeg built with --enable-libsnappy for Hap encoding support.
-# The standard brew ffmpeg doesn't include this; you may need to build
-# ffmpeg from source or use a custom build.
+# Requires Python 3 for the Hap7/HapM fixture generators.
 #
 # Usage: ./scripts/generate_fixtures.sh [output_dir]
 # Default output directory: tests/fixtures/
@@ -21,35 +20,29 @@ DURATION=4
 # Check if hap encoder is available
 if ! ffmpeg -encoders 2>/dev/null | grep -q hap; then
   echo "ERROR: Hap encoder not available in ffmpeg."
-  echo "Rebuild ffmpeg with --enable-libsnappy or use a custom build."
-  echo "See: https://github.com/Vidvox/hap-ffmpeg"
-  echo ""
-  echo "To build ffmpeg with hap support:"
-  echo "  brew install snappy"
-  echo "  git clone https://github.com/FFmpeg/FFmpeg.git"
-  echo "  cd FFmpeg && ./configure --enable-libsnappy && make"
+  echo "Install FFmpeg built with --enable-libsnappy for Hap encoding."
   exit 1
 fi
 
-SOURCE_OPTS="-f lavfi -i testsrc2=size=${WIDTH}x${HEIGHT}:rate=${FPS}:duration=${DURATION}"
+SOURCE_OPTS=(-f lavfi -i "testsrc2=size=${WIDTH}x${HEIGHT}:rate=${FPS}:duration=${DURATION}")
 
 echo "Generating hap1 fixture..."
-ffmpeg -y $SOURCE_OPTS -c:v hap -format hap -compressor snappy -chunks 1 "$OUTDIR/hap1.mov"
+ffmpeg -y "${SOURCE_OPTS[@]}" -c:v hap -format hap -compressor snappy -chunks 1 "$OUTDIR/hap1.mov"
 
 echo "Generating hap5 fixture..."
-ffmpeg -y $SOURCE_OPTS -c:v hap -format hap_alpha -compressor snappy -chunks 1 "$OUTDIR/hap5.mov"
+ffmpeg -y "${SOURCE_OPTS[@]}" -c:v hap -format hap_alpha -compressor snappy -chunks 1 "$OUTDIR/hap5.mov"
 
 echo "Generating hapy fixture..."
-ffmpeg -y $SOURCE_OPTS -c:v hap -format hap_q -compressor snappy -chunks 1 "$OUTDIR/hapy.mov"
+ffmpeg -y "${SOURCE_OPTS[@]}" -c:v hap -format hap_q -compressor snappy -chunks 1 "$OUTDIR/hapy.mov"
 
 echo "Generating hap1_chunked fixture (4 chunks)..."
-ffmpeg -y $SOURCE_OPTS -c:v hap -format hap -compressor snappy -chunks 4 "$OUTDIR/hap1_chunked.mov"
+ffmpeg -y "${SOURCE_OPTS[@]}" -c:v hap -format hap -compressor snappy -chunks 4 "$OUTDIR/hap1_chunked.mov"
 
 echo "Generating hapy_chunked fixture (4 chunks)..."
-ffmpeg -y $SOURCE_OPTS -c:v hap -format hap_q -compressor snappy -chunks 4 "$OUTDIR/hapy_chunked.mov"
+ffmpeg -y "${SOURCE_OPTS[@]}" -c:v hap -format hap_q -compressor snappy -chunks 4 "$OUTDIR/hapy_chunked.mov"
 
 echo "Generating hap5_chunked fixture (4 chunks)..."
-ffmpeg -y $SOURCE_OPTS -c:v hap -format hap_alpha -compressor snappy -chunks 4 "$OUTDIR/hap5_chunked.mov"
+ffmpeg -y "${SOURCE_OPTS[@]}" -c:v hap -format hap_alpha -compressor snappy -chunks 4 "$OUTDIR/hap5_chunked.mov"
 
 echo "Generating hap1_audio fixture..."
 ffmpeg -y -f lavfi -i testsrc2=size=${WIDTH}x${HEIGHT}:rate=${FPS}:duration=${DURATION} \
