@@ -576,7 +576,7 @@ test "multi-chunk frame decodes via the inner pool" {
     // 1024 bytes = 128 BC1 blocks; the builder always emits exactly the
     // requested chunk count, so this reliably drives the shared
     // InnerThreadPool with 4 chunks.
-    var bc1_data: [1024]u8 = [_]u8{0} ** 1024;
+    var bc1_data: [1024]u8 = @splat(0);
     var i: usize = 0;
     while (i < bc1_data.len) : (i += 8) {
         bc1_data[i + 0] = 0xFF;

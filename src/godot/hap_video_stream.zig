@@ -36,31 +36,15 @@ allocator: Allocator,
 base: *VideoStream,
 file_path: String = .empty,
 
-/// Constructs a HapVideoStream with its base object left in RefCounted's
-/// "pending" (unclaimed) state -- i.e. NOT wrapped through `VideoStream.init()`
-/// (which also calls `initRef()`). This is the same create_instance_func
-/// gdzig registers as `HapVideoStream`'s ClassDB constructor (see register()'s
-/// `.auto` class registration), so it must behave like a create_instance_func
-/// target: construct only, and leave the single legitimate
-/// `init_ref()` claim to whichever code wraps the returned pointer first --
-/// GDScript's own `.new()`, or a `Variant`/engine-Ref conversion.
-///
-/// Calling the bundled `VideoStream.init()` here instead double-claims: our own
-/// claim plus GDScript's `.new()`-triggered wrap both succeed, leaving the
-/// object's reference count one higher than its actual owners, so it's never
-/// freed (confirmed empirically: `get_reference_count()` reads back 2, not 1,
-/// immediately after `HapVideoStream.new()`, and the object survives to
-/// Godot's ObjectDB leak report at shutdown). This looks like a gdzig
-/// bindgen/idiom mismatch rather than intended behavior -- gdzig's own
-/// generated `.init()` helpers (and its "plainly owned by the caller" doc
-/// comment on `RefCounted.init()`) assume the caller is the *only* claimant,
-/// which isn't true for a create_instance_func target. Every other call site
-/// that wants plain ownership uses createOwned() instead.
+/// ClassDB constructor. Godot 4.7's create_instance3 callback requires a
+/// claimed reference; older callbacks require an unclaimed base so the
+/// engine's first Ref/Variant wrapper can claim it without adding an extra
+/// reference. Native callers use createOwned() on either runtime.
 pub fn create(allocator: *Allocator) !*HapVideoStream {
     const self = try allocator.create(HapVideoStream);
     self.* = .{
         .allocator = allocator.*,
-        .base = constructPendingBase(),
+        .base = if (godot.version.gte(.@"4.7")) VideoStream.init() else constructPendingBase(),
     };
     self.base.setInstance(HapVideoStream, self);
     return self;
@@ -70,7 +54,7 @@ pub fn create(allocator: *Allocator) !*HapVideoStream {
 /// owns the result directly rather than returning it through ClassDB `.new()`.
 pub fn createOwned(allocator: *Allocator) !*HapVideoStream {
     const self = try create(allocator);
-    _ = self.base.initRef();
+    if (!godot.version.gte(.@"4.7")) _ = self.base.initRef();
     return self;
 }
 

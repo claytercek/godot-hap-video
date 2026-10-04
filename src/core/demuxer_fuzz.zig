@@ -58,17 +58,11 @@
 //! `-fsanitize-coverage=trace-cmp` calls (`__sanitizer_cov_trace_cmp*` /
 //! `_switch` / `_const_cmp*`), but Zig's own from-scratch fuzzer runtime
 //! doesn't implement that ABI -- only the pure-Zig coverage path does,
-//! confirmed with a minimal C-source-free repro on this toolchain
-//! (zig 0.16.0, aarch64-macos), which links and fuzzes fine under
-//! `--fuzz`. Separately, `--fuzz` in `-Dtest-optimize=Debug` hits an unrelated
-//! zig 0.16.0 std lib bug (a `*builtin.StackTrace` / `*debug.StackTrace`
-//! type mismatch in `compiler/test_runner.zig`'s failure-reporting path),
-//! reproducible even in a pure-Zig project -- so `--fuzz` is only
-//! reachable at all in `-Dtest-optimize=ReleaseFast`/`ReleaseSafe`, and even
-//! then only for C-source-free modules. Given this module always compiles
-//! the vendored C libraries, the coverage-guided engine is unusable here
-//! today; the `HAP_FUZZ_SECONDS`-gated test below is the practical local
-//! substitute (see its doc comment).
+//! confirmed again on Zig 0.17.0, aarch64-macos. The
+//! `HAP_FUZZ_SECONDS`-gated test below is the practical local substitute
+//! (see its doc comment). scripts/fuzz_demuxer.sh first tries the
+//! coverage-guided engine with `-Dtest-optimize=fast`, then falls back to
+//! the bounded random-input loop.
 
 const std = @import("std");
 const testing = std.testing;

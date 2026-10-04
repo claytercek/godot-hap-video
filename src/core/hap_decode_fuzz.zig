@@ -83,7 +83,7 @@ fn buildSeedFrames(allocator: std.mem.Allocator) !std.ArrayListUnmanaged([]u8) {
     var list = std.ArrayListUnmanaged([]u8).empty;
     errdefer freeSeedFrames(allocator, &list);
 
-    const bc = [_]u8{0x11} ** 32;
+    const bc: [32]u8 = @splat(0x11);
 
     // None-compressor, one frame per supported format nibble.
     inline for (.{ 0xAB, 0xAE, 0xAF, 0xA1, 0xAC }) |type_byte| {

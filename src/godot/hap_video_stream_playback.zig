@@ -49,14 +49,10 @@ const log = std.log.scoped(.hap_video_stream_playback);
 const GpuError = enum { initialize, present };
 
 pub fn register(r: *Registry) void {
-    // Abstract (non-instantiable from GDScript): a playback is only ever
-    // created internally, by the stock VideoStreamPlayer calling
-    // HapVideoStream._instantiatePlayback (which invokes create() directly).
-    // Marking it abstract removes the ClassDB `.new()` path -- which would
-    // otherwise double-claim the RefCounted base, since create()'s `.init()`
-    // legitimately claims the single reference for the internal path (see
-    // create()). Contrast HapVideoStream, which IS user-constructible and so
-    // must instead defer that claim (constructPendingBase).
+    // Abstract (non-instantiable from GDScript): playback is created only
+    // through the native createOwned()/createBorrowed() paths, which claim
+    // the initial reference. HapVideoStream also supports ClassDB creation
+    // and must adapt its initial reference claim to the Godot version.
     r.addClass(HapVideoStreamPlayback, r.allocator, .{ .is_abstract = true });
 }
 

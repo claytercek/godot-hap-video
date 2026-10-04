@@ -497,7 +497,7 @@ test "readSectionHeader parses a 4-byte header" {
 
 test "readSectionHeader parses an extended 8-byte header" {
     // 24-bit size zero -> real size in bytes 4..7 (LE). type at byte 3.
-    var buf = [_]u8{0} ** 12;
+    var buf: [12]u8 = @splat(0);
     buf[3] = 0xAB;
     std.mem.writeInt(u32, buf[4..8], 4, .little);
     const h = try readSectionHeader(&buf);
@@ -524,14 +524,14 @@ test "readSectionHeader rejects a size that overruns the buffer" {
 }
 
 test "frameTextureCount returns 1 for a single-texture frame" {
-    const payload = [_]u8{0} ** 8;
+    const payload: [8]u8 = @splat(0);
     const frame = try test_support.buildSection(testing.allocator, 0xAB, &payload);
     defer testing.allocator.free(frame);
     try testing.expectEqual(@as(u32, 1), try frameTextureCount(frame));
 }
 
 test "frameTextureCount walks multi-image sub-sections" {
-    const block = [_]u8{0} ** 8;
+    const block: [8]u8 = @splat(0);
     const sub0 = try test_support.buildSection(testing.allocator, 0xAB, &block);
     defer testing.allocator.free(sub0);
     const sub1 = try test_support.buildSection(testing.allocator, 0xAB, &block);
@@ -549,14 +549,14 @@ test "frameTextureCount walks multi-image sub-sections" {
 }
 
 test "frameTextureFormat maps the format nibble" {
-    const payload = [_]u8{0} ** 8;
+    const payload: [8]u8 = @splat(0);
     const frame = try test_support.buildSection(testing.allocator, 0xAF, &payload); // None|YCoCg
     defer testing.allocator.free(frame);
     try testing.expectEqual(HapTextureFormat.ycocg_dxt5, try frameTextureFormat(frame, 0));
 }
 
 test "decodeTexture rejects BC6H (Hap HDR) format nibbles" {
-    const payload = [_]u8{0} ** 8;
+    const payload: [8]u8 = @splat(0);
     inline for (.{ 0xA2, 0xA3 }) |type_byte| { // None|BC6H-unsigned / -signed
         const frame = try test_support.buildSection(testing.allocator, type_byte, &payload);
         defer testing.allocator.free(frame);

@@ -289,7 +289,7 @@ test "InnerThreadPool.execute dispatches every index exactly once across workers
     defer pool.destroy();
 
     const count: u32 = 37;
-    var seen = [_]std.atomic.Value(u32){std.atomic.Value(u32).init(0)} ** count;
+    var seen: [count]std.atomic.Value(u32) = @splat(.init(0));
 
     const Ctx = struct {
         fn work(p: ?*anyopaque, index: c_uint) void {
@@ -310,7 +310,7 @@ test "InnerThreadPool.execute can be called repeatedly (batch counter advances)"
     defer pool.destroy();
 
     const count: u32 = 10;
-    var totals = [_]std.atomic.Value(u32){std.atomic.Value(u32).init(0)} ** count;
+    var totals: [count]std.atomic.Value(u32) = @splat(.init(0));
 
     const Ctx = struct {
         fn work(p: ?*anyopaque, index: c_uint) void {

@@ -2,7 +2,7 @@
     .name = .hap_video,
     .fingerprint = 0xb6a6d00f1d4a61d2,
     .version = "0.0.0",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .gdzig = .{
             .path = "vendor/gdzig",

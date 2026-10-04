@@ -18,10 +18,25 @@ func _verify() -> void:
 			_fail("missing extension class %s" % extension_class)
 			return
 
+	# The loader's native createOwned path must transfer exactly one reference
+	# into the returned Variant, independently of ClassDB construction.
+	var loaded_stream := ResourceLoader.load("res://hap1.mov", "", ResourceLoader.CACHE_MODE_IGNORE)
+	if loaded_stream == null or loaded_stream.get_reference_count() != 1:
+		_fail("resource loader did not return a singly owned stream")
+		return
+	var loaded_ref: WeakRef = weakref(loaded_stream)
+	loaded_stream = null
+	if loaded_ref.get_ref() != null:
+		_fail("loaded stream survived after its owner released it")
+		return
+
 	var stream: Object = ClassDB.instantiate("HapVideoStream")
 	var player: Object = ClassDB.instantiate("HapPlayer")
 	if stream == null or player == null or not player is Node:
 		_fail("failed to instantiate Hap extension classes")
+		return
+	if stream.get_reference_count() != 1:
+		_fail("engine-created stream has an extra reference")
 		return
 	add_child(player)
 	player.opened.connect(func(): _opened = true)
@@ -131,7 +146,20 @@ func _verify() -> void:
 		_fail("clearing stream did not clear playback state")
 		return
 
+	# Keep only weak references so construction/teardown ownership is checked
+	# on both the legacy (4.6) and create_instance3 (4.7+) gdzig paths.
+	var stream_refs := [weakref(stream), weakref(empty_stream), weakref(malformed_stream), weakref(replacement_stream)]
+	stream = null
+	empty_stream = null
+	malformed_stream = null
+	replacement_stream = null
+	assigned_stream = null
 	player.queue_free()
+	await get_tree().process_frame
+	for stream_ref in stream_refs:
+		if stream_ref.get_ref() != null:
+			_fail("stream survived after all owners released it")
+			return
 	print("SMOKE: Hap fixture opened, played, sought, cleared, and rejected synchronous/asynchronous invalid replacements")
 	get_tree().quit(0)
 

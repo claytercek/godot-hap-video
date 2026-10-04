@@ -13,7 +13,7 @@
 # Two fuzzing paths, tried in order:
 #
 #   1. zig's own coverage-guided engine (`zig build test --fuzz=<limit>`).
-#      As of zig 0.16.0 this does NOT link for this project: `-ffuzz`
+#      As of zig 0.17.0 this does NOT link for this project: `-ffuzz`
 #      instruments the vendored C sources (minimp4.c, snappy.cc)
 #      with clang's classic `-fsanitize-coverage=trace-cmp` calls
 #      (__sanitizer_cov_trace_cmp*/_switch/_const_cmp*), and zig's
@@ -62,20 +62,20 @@ mkdir -p "$LOG_DIR"
 FUZZ_LIMIT=$((DURATION * 20000))
 
 echo "Attempting zig's coverage-guided fuzzer (zig build test --fuzz=${FUZZ_LIMIT}) ..." | tee "$LOG_FILE"
-if zig build test -Dtest-optimize=ReleaseFast "--fuzz=${FUZZ_LIMIT}" 2>&1 | tee -a "$LOG_FILE"; then
+if zig build test -Dtest-optimize=fast "--fuzz=${FUZZ_LIMIT}" 2>&1 | tee -a "$LOG_FILE"; then
   echo "Coverage-guided run completed cleanly." | tee -a "$LOG_FILE"
   exit 0
 fi
 
 cat <<'EOF' | tee -a "$LOG_FILE"
 
-Coverage-guided --fuzz failed to build/run (expected on zig 0.16.0 for this
+Coverage-guided --fuzz failed to build/run (expected on zig 0.17.0 for this
 project -- see this script's header comment). Falling back to the bounded
 random-input loop.
 EOF
 
 echo "Running HAP_FUZZ_SECONDS=${DURATION} zig build test ..." | tee -a "$LOG_FILE"
-HAP_FUZZ_SECONDS="$DURATION" zig build test -Dtest-optimize=ReleaseFast --summary all 2>&1 | tee -a "$LOG_FILE"
+HAP_FUZZ_SECONDS="$DURATION" zig build test -Dtest-optimize=fast --summary all 2>&1 | tee -a "$LOG_FILE"
 
 echo "Done. Log: $LOG_FILE"
 echo "Any crash/leak/hang above: copy the offending bytes into tests/fixtures/fuzz_regressions/ and add coverage in fuzz_regressions_test.zig (Demuxer.open) or hap_decode_fuzz.zig's decoder replay test (decoder.decode), whichever path found it."

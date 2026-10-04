@@ -28,13 +28,13 @@ jobs:
           submodules: recursive
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
       - name: Build macOS slices
         run: |
           mkdir -p staging
-          for mode in ReleaseSafe ReleaseFast; do
+          for mode in safe fast; do
             flavor=debug
-            [ "$mode" = ReleaseFast ] && flavor=release
+            [ "$mode" = fast ] && flavor=release
             zig build -Dtarget=aarch64-macos -Doptimize=$mode --summary all
             cp project/lib/libhap_video.dylib staging/libhap_video.macos-arm64.$flavor.dylib
             zig build -Dtarget=x86_64-macos -Doptimize=$mode --summary all
@@ -61,16 +61,16 @@ jobs:
           submodules: recursive
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
       - name: Build Linux targets
         run: |
           mkdir -p staging
           for target in x86_64-linux-gnu.2.31 aarch64-linux-gnu.2.31; do
             arch=${target%%-*}
             [ "$arch" = aarch64 ] && arch=arm64
-            for mode in ReleaseSafe ReleaseFast; do
+            for mode in safe fast; do
               flavor=debug
-              [ "$mode" = ReleaseFast ] && flavor=release
+              [ "$mode" = fast ] && flavor=release
               zig build "-Dtarget=$target" "-Doptimize=$mode" --summary all
               cp project/lib/libhap_video.so "staging/libhap_video.linux.$flavor.$arch.so"
             done
@@ -93,16 +93,16 @@ jobs:
           submodules: recursive
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
       - name: Build Windows targets
         run: |
           mkdir -p staging
           for target in x86_64-windows-gnu aarch64-windows-gnu; do
             arch=${target%%-*}
             [ "$arch" = aarch64 ] && arch=arm64
-            for mode in ReleaseSafe ReleaseFast; do
+            for mode in safe fast; do
               flavor=debug
-              [ "$mode" = ReleaseFast ] && flavor=release
+              [ "$mode" = fast ] && flavor=release
               zig build "-Dtarget=$target" "-Doptimize=$mode" --summary all
               cp project/lib/hap_video.dll "staging/hap_video.windows.$flavor.$arch.dll"
             done

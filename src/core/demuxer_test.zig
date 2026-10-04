@@ -29,7 +29,7 @@ fn buildStsdEntry(
     height: u16,
     entry_size: u32,
 ) [buf_len]u8 {
-    var buf: [buf_len]u8 = [_]u8{0} ** buf_len;
+    var buf: [buf_len]u8 = @splat(0);
     var pos: usize = 0;
 
     const putU32 = struct {

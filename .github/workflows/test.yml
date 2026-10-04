@@ -12,7 +12,6 @@ on:
       - "thirdparty/**"
       - "tests/**"
       - "scripts/**"
-      - ".github/actions/**"
       - ".gitmodules"
       - "build.zig"
       - "build.zig.zon"
@@ -23,8 +22,12 @@ on:
 
 jobs:
   native-macos:
-    name: Build, test & smoke (macOS)
+    name: Build, test & smoke (macOS, Godot ${{ matrix.godot }})
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        godot: [4.6.3, 4.7.1]
 
     steps:
       - name: Checkout
@@ -35,13 +38,19 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - name: Run core tests
         run: zig build test --summary all
 
       - name: Build extension
         run: zig build --summary all
+
+      - name: Setup Godot
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: ${{ matrix.godot }}
+          use-dotnet: false
 
       - name: Godot extension smoke test
         timeout-minutes: 2
@@ -70,10 +79,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
-
-      - name: Download Godot (for headers/bindgen)
-        uses: ./.github/actions/download-godot
+          version: 0.17.0
 
       - name: Build shipped target
         run: zig build -Dtarget=${{ matrix.target }} --summary all

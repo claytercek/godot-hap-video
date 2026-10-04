@@ -85,7 +85,7 @@ test "decoder decodes a single Hap1 BC1 block byte-identical to input" {
 
 test "decoder decodes multiple Hap1 BC1 blocks (2x2 grid)" {
     // 8x8 pixels = 4 BC1 blocks (2x2 grid)
-    var bc1_blocks = [_]u8{0} ** 32;
+    var bc1_blocks: [32]u8 = @splat(0);
     bc1_blocks[0] = 0x00;
     bc1_blocks[1] = 0x00; // Block 0: black
     bc1_blocks[8] = 0xFF;
@@ -107,7 +107,7 @@ test "decoder decodes multiple Hap1 BC1 blocks (2x2 grid)" {
 }
 
 test "decoder Hap1 frame reports a single texture" {
-    const bc1_block = [_]u8{0} ** 8;
+    const bc1_block: [8]u8 = @splat(0);
     const frame = try test_support.buildRawFrame(testing.allocator, &bc1_block, 0xAB);
     defer testing.allocator.free(frame);
 
@@ -128,7 +128,7 @@ test "decoder decodes a single Hap5 BC3 block byte-identical to input" {
 }
 
 test "decoder Hap5 frame reports a single texture" {
-    const bc3_block = [_]u8{0} ** 16;
+    const bc3_block: [16]u8 = @splat(0);
     const frame = try test_support.buildRawFrame(testing.allocator, &bc3_block, 0xAE);
     defer testing.allocator.free(frame);
 
@@ -148,7 +148,7 @@ test "decoder decodes a single Hap7 BC7 block byte-identical to input" {
 }
 
 test "decoder Hap7 frame reports a single texture" {
-    const bc7_block = [_]u8{0} ** 16;
+    const bc7_block: [16]u8 = @splat(0);
     const frame = try test_support.buildRawFrame(testing.allocator, &bc7_block, 0xAC);
     defer testing.allocator.free(frame);
 
@@ -202,7 +202,7 @@ test "decoder golden Hap1 frame: 4 BC1 blocks decode byte-identical" {
 }
 
 test "decoder golden Hap5 frame: 4 BC3 blocks decode byte-identical" {
-    var bc3_blocks: [64]u8 = [_]u8{0} ** 64;
+    var bc3_blocks: [64]u8 = @splat(0);
     // Block 0 (top-left): alpha opaque, white
     bc3_blocks[0] = 0xFF;
     bc3_blocks[1] = 0x00;
@@ -232,7 +232,7 @@ test "decoder golden Hap5 frame: 4 BC3 blocks decode byte-identical" {
 }
 
 test "decoder golden Hap7 frame: 4 BC7 blocks decode byte-identical" {
-    var bc7_blocks: [64]u8 = [_]u8{0} ** 64;
+    var bc7_blocks: [64]u8 = @splat(0);
     bc7_blocks[0] = 0x01;
     bc7_blocks[16] = 0x01;
     bc7_blocks[32] = 0x01;
@@ -247,7 +247,7 @@ test "decoder golden Hap7 frame: 4 BC7 blocks decode byte-identical" {
 
 test "decoder rejects a frame with an invalid type byte" {
     // Type byte 0x00: compressor = 0x0 (invalid), format = 0x0 (invalid).
-    const dummy = [_]u8{0} ** 16;
+    const dummy: [16]u8 = @splat(0);
     const frame = try test_support.buildRawFrame(testing.allocator, &dummy, 0x00);
     defer testing.allocator.free(frame);
 
@@ -260,7 +260,7 @@ test "decoder rejects a frame with an invalid type byte" {
 
 test "decoder rejects a frame with an unsupported compressor nibble" {
     // Type byte 0xD0: compressor = 0xD (invalid), format = 0x0 (invalid).
-    const dummy = [_]u8{0} ** 16;
+    const dummy: [16]u8 = @splat(0);
     const frame = try test_support.buildRawFrame(testing.allocator, &dummy, 0xD0);
     defer testing.allocator.free(frame);
 
@@ -311,7 +311,7 @@ test "decoder leaves output empty when a later texture in a multi-image frame is
     // rejects it after texture 0 has already been decoded into output. This
     // is the mid-loop failure the "output left empty on failure" contract
     // exists for.
-    const dummy = [_]u8{0} ** 16;
+    const dummy: [16]u8 = @splat(0);
     const sub1 = try test_support.buildRawFrame(testing.allocator, &dummy, 0x00);
     defer testing.allocator.free(sub1);
 
@@ -376,7 +376,7 @@ test "decoder leaves output empty on failure even when it held a prior successfu
     const good_frame = try test_support.buildRawFrame(testing.allocator, &bc1_block, 0xAB);
     defer testing.allocator.free(good_frame);
 
-    const dummy = [_]u8{0} ** 16;
+    const dummy: [16]u8 = @splat(0);
     const bad_frame = try test_support.buildRawFrame(testing.allocator, &dummy, 0x00);
     defer testing.allocator.free(bad_frame);
 
@@ -490,7 +490,7 @@ test "decoder chunked BC1 (Hap1) decode is byte-identical to unchunked" {
 
 test "decoder chunked HapY (YCoCg-DXT5) decode is byte-identical to unchunked" {
     // 64x32 pixels = 128 BC3 blocks (2048 bytes); large enough for Complex compression.
-    var bc3_blocks: [2048]u8 = [_]u8{0} ** 2048;
+    var bc3_blocks: [2048]u8 = @splat(0);
     var i: usize = 0;
     while (i < bc3_blocks.len) : (i += 16) {
         bc3_blocks[i + 0] = 0xFF;

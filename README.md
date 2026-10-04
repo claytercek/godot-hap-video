@@ -175,20 +175,26 @@ git clone --recurse-submodules <repository-url>
 cd godot-hap-video
 ```
 
-Use **Zig 0.16.0**. The core test suite does not need Godot:
+Use **Zig 0.17.0**. The core test suite does not need Godot:
 
 ```bash
 zig build test
 ```
 
-Building the extension needs a Godot executable for GDExtension binding
-generation. By default, the build asks gdzig for Godot 4.6. Supply a local
-executable when needed:
+The gdzig submodule uses canonical upstream, pinned to
+`7e50fe4eeed6b6d6437e61706f25906f8a68eac7`. It includes the nullable-object
+and nullable-Ref ptrcall fixes previously carried by our fork. Its vendored
+Godot API and interface header let you build the extension and cross-compile
+without installing Godot.
+
+`run` and `smoke` need Godot 4.6 or newer. They use `-Dgodot-path`, then
+`GODOT_PATH`, then `godot` on `PATH`. Godot is no longer downloaded by the
+build, and `-Dgodot-version` is no longer supported:
 
 ```bash
-zig build -Dgodot-path=/path/to/godot
+zig build smoke -Dgodot-path=/path/to/godot
 # or
-GODOT_PATH=/path/to/godot zig build
+GODOT_PATH=/path/to/godot zig build run
 ```
 
 The development build installs the library into `project/lib/` and uses
@@ -199,14 +205,19 @@ manifest. Useful commands:
 zig build                         # build the development extension
 zig build run                     # build, then run the development demo
 zig build smoke                   # build, then open and present the bundled fixture
-zig build test -Dtest-optimize=Debug # core tests with Zig runtime safety checks
+zig build test -Dtest-optimize=debug # core tests with Zig runtime safety checks
 zig build test -Dsanitize-c=full  # core tests with C/C++ UBSan
 ```
 
 `zig build run -- <args>` forwards `<args>` to Godot. `zig build smoke`
 checks that the extension can open the bundled Hap fixture, present a frame,
-expose metadata, seek, and preserve playback after a rejected replacement. It
-requires a RenderingDevice.
+expose metadata, seek, preserve playback after a rejected replacement, and
+release stream references. It requires a RenderingDevice and checks for the
+script's completion marker rather than relying on Godot's exit code alone.
+
+On Godot 4.6, this upstream revision logs missing 4.7 interface probes (`variant_get_type_by_name`, `classdb_construct_object3`,
+`classdb_register_extension_class6`) at startup; the 4.6 fallback still runs
+and the smoke test passes.
 
 ## Project layout
 

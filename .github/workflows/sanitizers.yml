@@ -4,9 +4,9 @@ name: Sanitizers
 # run on every PR and nightly. Two lanes, two
 # different guarantees:
 #
-#   - debug_safety: `-Dtest-optimize=Debug` turns on Zig's own runtime safety
+#   - debug_safety: `-Dtest-optimize=debug` turns on Zig's own runtime safety
 #     checks (bounds, overflow, etc.) for the core Zig code.
-#   - ubsan: `-Dtest-optimize=Debug -Dsanitize-c=full` layers
+#   - ubsan: `-Dtest-optimize=debug -Dsanitize-c=full` layers
 #     UndefinedBehaviorSanitizer onto the vendored C/C++ the core links
 #     against (hap, minimp4, snappy).
 # No AddressSanitizer or ThreadSanitizer lane exists in this file.
@@ -26,9 +26,9 @@ jobs:
       matrix:
         lane:
           - name: Debug safety checks
-            flags: -Dtest-optimize=Debug
+            flags: -Dtest-optimize=debug
           - name: UBSan
-            flags: -Dtest-optimize=Debug -Dsanitize-c=full
+            flags: -Dtest-optimize=debug -Dsanitize-c=full
 
     steps:
       - name: Checkout
@@ -39,7 +39,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - name: Run core tests
         run: zig build test ${{ matrix.lane.flags }} --summary all
