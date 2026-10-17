@@ -93,6 +93,14 @@ fn fuzzOpen(context: void, smith: *testing.Smith) !void {
     // crash/leak/hang), not that it succeeds. A typed failure is the
     // expected outcome for almost every input.
     dem.open(testing.allocator, &reader) catch {};
+    if (dem.audio) |*audio| {
+        var output: [67]f32 = @splat(123);
+        const starts = [_]u64{ 0, 1, audio.info.frame_count, std.math.maxInt(u64) };
+        for (starts) |start| {
+            try testing.expectEqual(@as(usize, 33), audio.read(start, &output));
+            try testing.expectEqual(@as(f32, 123), output[66]);
+        }
+    }
 }
 
 const fixture_paths = [_][]const u8{

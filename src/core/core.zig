@@ -7,6 +7,7 @@ const std = @import("std");
 pub const hap_frame = @import("hap_frame.zig");
 pub const mmap_reader = @import("mmap_reader.zig");
 pub const demuxer = @import("demuxer.zig");
+pub const pcm_audio = @import("pcm_audio.zig");
 pub const thread_pool = @import("thread_pool.zig");
 pub const hap_decode = @import("hap_decode.zig");
 pub const decoder = @import("decoder.zig");
@@ -22,6 +23,9 @@ test {
     _ = mmap_reader;
     _ = demuxer;
     _ = @import("demuxer_test.zig");
+    _ = pcm_audio;
+    _ = @import("pcm_audio_test.zig");
+    _ = @import("minimp4_compact_test.zig");
     _ = thread_pool;
     _ = hap_decode;
     _ = decoder;

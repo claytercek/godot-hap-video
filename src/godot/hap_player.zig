@@ -19,6 +19,8 @@ const Registry = godot.extension.Registry;
 const Control = godot.class.Control;
 const Texture2d = godot.class.Texture2d;
 const String = godot.builtin.String;
+const StringName = godot.builtin.StringName;
+const Node = godot.class.Node;
 const PropertyUsageFlags = godot.global.PropertyUsageFlags;
 
 // Core types come through the "core" named module (build.zig-wired) so they
@@ -29,6 +31,7 @@ const PlaybackController = core.playback_controller.PlaybackController;
 const HapVideoStream = @import("hap_video_stream.zig");
 const HapVideoStreamPlayback = @import("hap_video_stream_playback.zig");
 const ref = @import("ref.zig");
+const audio_output = @import("audio_output.zig");
 
 const log = std.log.scoped(.hap_player);
 
@@ -64,6 +67,8 @@ pub fn register(r: *Registry) void {
     class.addProperty("loop", .{ .getter = .{ .method = is_loop }, .setter = .{ .method = set_loop } });
 
     class.addProperty("playback_speed", .auto);
+    class.addProperty("bus", .auto);
+    class.addProperty("volume_db", .{ .hint = .property_hint_range, .hint_string = String.fromLatin1("-80,24,0.01,suffix:dB") });
 
     const is_autoplay = class.createMethod("is_autoplay", .auto);
     const set_autoplay = class.createMethod("set_autoplay", .auto);
@@ -81,6 +86,9 @@ pub fn register(r: *Registry) void {
     class.addProperty("height", .{ .setter = .none, .usage = read_only_usage });
     class.addProperty("duration", .{ .setter = .none, .usage = read_only_usage });
     class.addProperty("frame_count", .{ .setter = .none, .usage = read_only_usage });
+    class.addProperty("has_audio", .{ .setter = .none, .usage = read_only_usage });
+    class.addProperty("audio_sample_rate", .{ .setter = .none, .usage = read_only_usage });
+    class.addProperty("audio_channels", .{ .setter = .none, .usage = read_only_usage });
 
     class.addSignal(Opened);
     class.addSignal(PlaybackCompleted);
@@ -113,6 +121,8 @@ pending_controller: PlaybackController = .init(),
 autoplay: bool = false,
 
 error_fired: bool = false,
+audio: audio_output.GeneratorOutput = .{},
+audio_tree_enabled: bool = false,
 
 pub fn create(allocator: *Allocator) !*HapPlayer {
     const self = try allocator.create(HapPlayer);
@@ -127,6 +137,7 @@ pub fn create(allocator: *Allocator) !*HapPlayer {
 pub fn destroy(self: *HapPlayer, allocator: *Allocator) void {
     self.clearPendingStream();
     self.clearStream();
+    self.audio.deinit();
     self.base.destroy();
     allocator.destroy(self);
 }
@@ -195,6 +206,7 @@ fn clearPendingStream(self: *HapPlayer) void {
 }
 
 fn clearStream(self: *HapPlayer) void {
+    self.audio.stop();
     if (self.playback) |pb| {
         self.playback = null;
         ref.releaseAndDestroy(HapVideoStreamPlayback, pb, &self.allocator);
@@ -241,6 +253,20 @@ pub fn getPlaybackSpeed(self: *HapPlayer) f64 {
 }
 pub fn setPlaybackSpeed(self: *HapPlayer, value: f64) void {
     self.selectedController().setPlaybackSpeed(value);
+    self.reconcileAudio();
+}
+
+pub fn getBus(self: *HapPlayer) StringName {
+    return self.audio.getBus();
+}
+pub fn setBus(self: *HapPlayer, value: StringName) void {
+    self.audio.setBus(value);
+}
+pub fn getVolumeDb(self: *HapPlayer) f64 {
+    return self.audio.volume_db;
+}
+pub fn setVolumeDb(self: *HapPlayer, value: f64) void {
+    self.audio.setVolumeDb(value);
 }
 
 pub fn isAutoplay(self: *HapPlayer) bool {
@@ -258,6 +284,7 @@ pub fn setStreamPosition(self: *HapPlayer, position: f64) void {
     if (self.selectedPlayback()) |pb| {
         if (pb.isReady()) pb.advance(request);
     }
+    self.reconcileAudio();
 }
 
 pub fn isPaused(self: *HapPlayer) bool {
@@ -265,6 +292,7 @@ pub fn isPaused(self: *HapPlayer) bool {
 }
 pub fn setPaused(self: *HapPlayer, value: bool) void {
     self.selectedController().setPaused(value);
+    self.reconcileAudio();
 }
 
 /// Start (or resume) playback from the current stream_position, in the
@@ -272,12 +300,14 @@ pub fn setPaused(self: *HapPlayer, value: bool) void {
 /// resuming after pause/completion continues from where playback left off.
 pub fn play(self: *HapPlayer) void {
     self.selectedController().play();
+    self.reconcileAudio();
 }
 
 /// Freeze the pump in place; texture and stream_position are retained.
 /// Equivalent to set_paused(true).
 pub fn pause(self: *HapPlayer) void {
     self.selectedController().pause();
+    self.reconcileAudio();
 }
 
 /// Halt playback and reset stream_position to 0.
@@ -286,6 +316,7 @@ pub fn stop(self: *HapPlayer) void {
     if (self.selectedPlayback()) |pb| {
         if (pb.isReady()) pb.advance(request);
     }
+    self.reconcileAudio();
 }
 
 /// Pause-gated: auto-pauses if playing, then moves exactly n frames (n may
@@ -295,6 +326,7 @@ pub fn stepFrame(self: *HapPlayer, n: i64) void {
     const pb = self.selectedPlayback() orelse return;
     if (!pb.isReady()) return;
     if (self.selectedController().stepFrame(n)) |request| pb.advance(request);
+    self.reconcileAudio();
 }
 
 pub fn getTexture(self: *HapPlayer) ?*Texture2d {
@@ -320,11 +352,46 @@ pub fn getFrameCount(self: *HapPlayer) i64 {
     return if (self.selectedPlayback()) |pb| @intCast(pb.getFrameCount()) else 0;
 }
 
+pub fn getHasAudio(self: *HapPlayer) bool {
+    return if (self.selectedPlayback()) |pb| pb.audioInfo() != null else false;
+}
+pub fn getAudioSampleRate(self: *HapPlayer) i64 {
+    const pb = self.selectedPlayback() orelse return 0;
+    return if (pb.audioInfo()) |info| info.sample_rate else 0;
+}
+pub fn getAudioChannels(self: *HapPlayer) i64 {
+    const pb = self.selectedPlayback() orelse return 0;
+    return if (pb.audioInfo()) |info| info.channels else 0;
+}
+
+fn reconcileAudio(self: *HapPlayer) void {
+    const pb = self.playback orelse {
+        self.audio.stop();
+        return;
+    };
+    self.audio.reconcile(.upcast(self.base), &pb.scheduler, &self.controller, self.audio_tree_enabled and self.base.isInsideTree() and self.base.canProcess() and pb.isReady());
+}
+
+pub fn _notification(self: *HapPlayer, what: i32, _: bool) void {
+    switch (what) {
+        Node.NOTIFICATION_ENTER_TREE => self.audio_tree_enabled = true,
+        Node.NOTIFICATION_EXIT_TREE => {
+            self.audio_tree_enabled = false;
+            self.audio.stop();
+        },
+        Node.NOTIFICATION_PAUSED, Node.NOTIFICATION_DISABLED => self.audio.stop(),
+        Node.NOTIFICATION_UNPAUSED, Node.NOTIFICATION_ENABLED => self.reconcileAudio(),
+        else => {},
+    }
+}
+
 pub fn _ready(self: *HapPlayer) void {
     self.base.setProcess(true);
+    self.reconcileAudio();
 }
 
 pub fn _process(self: *HapPlayer, delta: f64) void {
+    self.audio.tickDrain();
     self.pollPendingStream();
 
     const pb = self.playback orelse return;
@@ -343,6 +410,7 @@ pub fn _process(self: *HapPlayer, delta: f64) void {
     }
 
     if (pb.hasFailed()) {
+        self.audio.stop();
         if (!self.error_fired) {
             self.error_fired = true;
             var message = pb.getError();
@@ -355,6 +423,8 @@ pub fn _process(self: *HapPlayer, delta: f64) void {
     if (!now_ready) return;
 
     const step = pb.updateController(delta);
+    if (step.completed) self.audio.completed();
+    self.reconcileAudio();
 
     if (step.looped) self.base.emit(PlaybackLooped, .{}) catch {};
     if (step.completed) self.base.emit(PlaybackCompleted, .{}) catch {};
@@ -388,6 +458,8 @@ fn pollPendingStream(self: *HapPlayer) void {
     self.playback = pb;
     self.stream = stream;
     self.error_fired = false;
+
+    self.reconcileAudio();
 
     self.base.emit(Opened, .{}) catch {};
     if (self.autoplay) self.play();

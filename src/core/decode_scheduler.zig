@@ -57,6 +57,7 @@ const decoder_mod = @import("decoder.zig");
 const frame_queue = @import("frame_queue.zig");
 const outer_thread_pool = @import("outer_thread_pool.zig");
 const sync = @import("sync.zig");
+const pcm_audio = @import("pcm_audio.zig");
 
 const MmapReader = mmap_reader.MmapReader;
 const Demuxer = demuxer_mod.Demuxer;
@@ -250,6 +251,26 @@ pub const DecodeScheduler = struct {
     /// Valid only once isOpen() is true.
     pub fn trackInfo(self: *const DecodeScheduler) VideoTrackInfo {
         return self.demuxer.track;
+    }
+
+    pub fn audioInfo(self: *const DecodeScheduler) ?pcm_audio.AudioInfo {
+        if (!self.isOpen()) return null;
+        if (self.demuxer.audio) |*audio| return audio.info;
+        return null;
+    }
+
+    pub fn audioWarning(self: *const DecodeScheduler) ?pcm_audio.AudioWarning {
+        if (!self.isOpen()) return null;
+        return self.demuxer.audio_warning;
+    }
+
+    /// Bounded main-thread PCM conversion, never a real-time audio callback.
+    /// Independent of the video worker's mutable minimp4 frame-offset cache.
+    /// The caller must serialize this with scheduler teardown, as for queue use.
+    pub fn readAudio(self: *const DecodeScheduler, start_frame: u64, out_stereo: []f32) usize {
+        if (!self.isOpen()) return 0;
+        const audio = if (self.demuxer.audio) |*audio| audio else return 0;
+        return audio.read(start_frame, out_stereo);
     }
 
     /// Unique id used for outer-pool per-stream serialization. Exposed

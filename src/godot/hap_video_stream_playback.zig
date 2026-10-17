@@ -43,6 +43,9 @@ const TickResult = core.playback_controller.TickResult;
 
 const gpu_presenter_mod = @import("gpu_presenter.zig");
 const GpuPresenter = gpu_presenter_mod.GpuPresenter;
+const audio_output = @import("audio_output.zig");
+const AudioInfo = audio_output.AudioInfo;
+const PackedFloat32Array = godot.builtin.PackedFloat32Array;
 
 const log = std.log.scoped(.hap_video_stream_playback);
 
@@ -82,6 +85,20 @@ gpu_error: ?GpuError = null,
 
 // GPU presenter for RD-based texture upload + compute.
 gpu_presenter: GpuPresenter,
+
+// Captured before stock _instantiatePlayback returns. Godot caches channels
+// and mix rate during set_stream, before its first _update call.
+audio_info: ?AudioInfo = null,
+audio_warning_logged: bool = false,
+audio_track_enabled: bool = true,
+audio_track_warning_logged: bool = false,
+audio_mix_failed: bool = false,
+audio_cursor: audio_output.Cursor = .{},
+audio_staging: ?PackedFloat32Array = null,
+audio_drain_deadline_usec: u64 = 0,
+// Stock VideoStreamPlayer queries these virtuals on its audio thread. Never
+// dereference the main-thread controller, scheduler, or GPU state there.
+transport_snapshot: std.atomic.Value(u8) = .init(0),
 
 /// Constructor required by class registration. Internal callers should use
 /// createOwned() or createBorrowed() to make ownership explicit.
@@ -126,6 +143,7 @@ pub fn destroy(self: *HapVideoStreamPlayback, allocator: *Allocator) void {
     // scheduler. Freeing the presenter first is simply grouped for
     // readability.
     self.gpu_presenter.deinit();
+    if (self.audio_staging) |*buffer| buffer.deinit();
     self.scheduler.deinit();
     if (self.owns_controller) self.allocator.destroy(self.controller);
     self.base.destroy();
@@ -170,6 +188,8 @@ pub fn open(self: *HapVideoStreamPlayback, p_path: String) bool {
 /// computes duration, and initializes GPU resources.
 fn initializeAfterOpen(self: *HapVideoStreamPlayback) void {
     self.track = self.scheduler.trackInfo();
+    self.audio_info = self.scheduler.audioInfo();
+    self.warnAudioOnce();
 
     self.controller.configure(self.track.frame_rate, self.track.frame_count);
 
@@ -301,6 +321,64 @@ pub fn getFrameCount(self: *const HapVideoStreamPlayback) i32 {
     return @intCast(self.track.frame_count);
 }
 
+pub fn audioInfo(self: *const HapVideoStreamPlayback) ?AudioInfo {
+    return self.audio_info;
+}
+
+fn warnAudioOnce(self: *HapVideoStreamPlayback) void {
+    if (self.audio_warning_logged) return;
+    if (self.scheduler.audioWarning()) |warning| {
+        log.warn("{s}; continuing video without audio", .{warning.message()});
+        self.audio_warning_logged = true;
+    }
+}
+
+fn publishTransport(self: *HapVideoStreamPlayback) void {
+    if (self.hasFailed()) {
+        self.failStockPlayback();
+        return;
+    }
+    const playing = self.controller.isPlaying() or self.audio_drain_deadline_usec > 0;
+    const paused = self.controller.isPaused() or self.audio_mix_failed;
+    self.transport_snapshot.store(@as(u8, @intFromBool(playing)) | (@as(u8, @intFromBool(paused)) << 1), .release);
+}
+
+/// Main-thread PCM reads, capped at four 4096-frame batches. mixAudio returns
+/// accepted FRAMES, not floats. Keep the cursor on partial acceptance and
+/// abandon stale leftovers after a stall instead of replaying them late.
+fn feedStockAudio(self: *HapVideoStreamPlayback) void {
+    const info = self.audio_info orelse return;
+    if (self.audio_mix_failed or !self.controller.audioEnabled()) return;
+    const generation = self.controller.audioGeneration();
+    if (self.audio_cursor.generation != generation)
+        self.audio_cursor.reset(generation, self.controller.position(), info.sample_rate);
+    if (self.audio_staging == null) self.audio_staging = .init();
+    const buffer = &self.audio_staging.?;
+    for (0..audio_output.batches_per_update) |_| {
+        const count = self.audio_cursor.count(self.controller.position(), self.duration(), info.sample_rate);
+        if (count == 0 or buffer.resize(@intCast(count * 2)) != 0) break;
+        const floats: [*]f32 = @ptrCast(buffer.index(0));
+        // A disabled track still feeds silence and lets the stock resampler
+        // consume its bounded queue. Advertising an artificial pause would
+        // freeze old PCM there, replaying it when track 0 is selected again.
+        const read = if (self.audio_track_enabled)
+            self.scheduler.readAudio(self.audio_cursor.next_frame, floats[0 .. count * 2])
+        else blk: {
+            @memset(floats[0 .. count * 2], 0);
+            break :blk count;
+        };
+        if (read == 0) break;
+        const accepted = self.base.mixAudio(@intCast(read), .{ .buffer = buffer.*, .offset = 0 });
+        if (accepted < 0) {
+            log.warn("Godot rejected the PCM mix callback; continuing video without audio", .{});
+            self.audio_mix_failed = true;
+            break;
+        }
+        self.audio_cursor.next_frame += @min(read, @as(usize, @intCast(accepted)));
+        if (accepted < read) break;
+    }
+}
+
 /// Apply a controller-issued frame request to decode/present. A no-op until
 /// the stream is ready.
 pub fn advance(self: *HapVideoStreamPlayback, request: FrameRequest) void {
@@ -362,23 +440,43 @@ fn presentUpToFrame(self: *HapVideoStreamPlayback, target_frame: u32, forward: b
 // -----------------------------------------------------------------------
 
 pub fn _play(self: *HapVideoStreamPlayback) void {
-    self.advance(self.controller.restart());
+    // VideoStreamPlayer may call play again automatically when looping. A
+    // terminal decoder/GPU failure must not restart a PCM-only loop forever.
+    if (self.hasFailed()) {
+        self.failStockPlayback();
+        return;
+    }
+    self.audio_drain_deadline_usec = 0;
+    // The stock node owns its paused property and does not resend it when
+    // play/stop is called. Keep that state across the core's restart policy.
+    const paused = self.controller.isPaused();
+    const request = self.controller.restart();
+    self.controller.setPaused(paused);
+    self.advance(request);
+    self.feedStockAudio();
+    self.publishTransport();
 }
 
 pub fn _stop(self: *HapVideoStreamPlayback) void {
+    const paused = self.controller.isPaused();
     _ = self.controller.stop();
+    self.controller.setPaused(paused);
+    self.audio_cursor = .{};
+    self.audio_drain_deadline_usec = 0;
+    self.publishTransport();
 }
 
 pub fn _isPlaying(self: *const HapVideoStreamPlayback) bool {
-    return self.controller.isPlaying();
+    return self.transport_snapshot.load(.acquire) & 1 != 0;
 }
 
 pub fn _setPaused(self: *HapVideoStreamPlayback, p_paused: bool) void {
     self.controller.setPaused(p_paused);
+    self.publishTransport();
 }
 
 pub fn _isPaused(self: *const HapVideoStreamPlayback) bool {
-    return self.controller.isPaused();
+    return self.transport_snapshot.load(.acquire) & 2 != 0;
 }
 
 /// Total playback duration in seconds. Shared implementation behind the
@@ -396,12 +494,19 @@ pub fn _getPlaybackPosition(self: *const HapVideoStreamPlayback) f64 {
 }
 
 pub fn _seek(self: *HapVideoStreamPlayback, p_time: f64) void {
+    self.audio_drain_deadline_usec = 0;
+    self.audio_cursor = .{};
     self.advance(self.controller.seek(p_time));
+    self.publishTransport();
 }
 
 pub fn _setAudioTrack(self: *HapVideoStreamPlayback, p_idx: i32) void {
-    _ = self;
-    _ = p_idx;
+    self.audio_track_enabled = p_idx == 0;
+    if (p_idx != 0 and !self.audio_track_warning_logged) {
+        log.warn("Only the first embedded audio track (index 0) is supported; audio disabled", .{});
+        self.audio_track_warning_logged = true;
+    }
+    self.publishTransport();
 }
 
 /// The presented Texture2D, returned with a SEPARATE +1 reference for the
@@ -420,27 +525,45 @@ pub fn _getTexture(self: *HapVideoStreamPlayback) ?*Texture2d {
     return tex;
 }
 
+fn failStockPlayback(self: *HapVideoStreamPlayback) void {
+    // Video/GPU failure is terminal, unlike optional PCM failure. Let the
+    // stock player stop and flush instead of keeping a stale playing flag.
+    self.audio_drain_deadline_usec = 0;
+    self.transport_snapshot.store(0, .release);
+    if (!self.failure_logged) {
+        var err = self.getError();
+        defer err.deinit();
+        var buf: [512]u8 = undefined;
+        log.err("{s}", .{err.toUtf8Buf(&buf)});
+        self.failure_logged = true;
+    }
+}
+
 pub fn _update(self: *HapVideoStreamPlayback, p_delta: f64) void {
     if (!self.pollReady()) {
-        if (self.hasFailed() and !self.failure_logged) {
-            var err = self.getError();
-            defer err.deinit();
-            var buf: [512]u8 = undefined;
-            log.err("{s}", .{err.toUtf8Buf(&buf)});
-            self.failure_logged = true;
-        }
+        if (self.hasFailed()) self.failStockPlayback();
         return;
     }
 
-    _ = self.updateController(p_delta);
+    if (self.audio_drain_deadline_usec > 0 and godot.class.Time.getTicksUsec() >= self.audio_drain_deadline_usec)
+        self.audio_drain_deadline_usec = 0;
+    self.feedStockAudio();
+    const tick = self.updateController(p_delta);
+    if (tick.completed and self.audio_info != null and !self.audio_mix_failed) {
+        // The stock player flushes its resampler as soon as isPlaying turns
+        // false. Keep ONLY the atomic transport alive for a bounded tail drain;
+        // the controller still completes normally at the video endpoint.
+        // Wall time, not p_delta: stock speed_scale is folded into p_delta
+        // (including zero), and must never make the drain last indefinitely.
+        self.audio_drain_deadline_usec = godot.class.Time.getTicksUsec() + @as(u64, @intFromFloat(audio_output.drain_seconds * 1_000_000));
+    }
+    self.publishTransport();
 }
 
 pub fn _getChannels(self: *const HapVideoStreamPlayback) i32 {
-    _ = self;
-    return 0;
+    return if (self.audio_info != null) 2 else 0;
 }
 
 pub fn _getMixRate(self: *const HapVideoStreamPlayback) i32 {
-    _ = self;
-    return 0;
+    return if (self.audio_info) |info| @intCast(info.sample_rate) else 0;
 }

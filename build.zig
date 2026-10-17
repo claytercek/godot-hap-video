@@ -167,5 +167,19 @@ pub fn build(b: *Build) !void {
     smoke.expectStdOutMatch("SMOKE: Hap fixture opened, played, sought, cleared, and rejected synchronous/asynchronous invalid replacements");
     smoke.has_side_effects = true;
     smoke.step.dependOn(&install.step);
-    b.step("smoke", "Load the extension and instantiate its public Godot classes").dependOn(&smoke.step);
+
+    const audio_smoke = Build.Step.Run.create(b, "capture embedded PCM from both Godot players");
+    audio_smoke.addArg(godot_path);
+    audio_smoke.addArg("--path");
+    audio_smoke.addDirectoryArg(b.path("project"));
+    audio_smoke.addArg("res://audio_smoke.tscn");
+    audio_smoke.expectStdOutMatch("AUDIO_SMOKE: mono16, stereo16BE, stereo24BE captured from both players; seek/loop content, controls, unsupported audio, and teardown passed");
+    audio_smoke.has_side_effects = true;
+    audio_smoke.step.dependOn(&install.step);
+    b.step("audio-smoke", "Capture PCM and verify audio controls (requires a real audio driver)").dependOn(&audio_smoke.step);
+
+    // Serial execution avoids racing Godot's project/import cache. The audio
+    // scene captures before a muted sink bus: no physical speaker is needed.
+    audio_smoke.step.dependOn(&smoke.step);
+    b.step("smoke", "Run video ownership/presentation and PCM capture smoke tests serially").dependOn(&audio_smoke.step);
 }

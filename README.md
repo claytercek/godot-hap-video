@@ -3,6 +3,7 @@
 Play Hap-encoded QuickTime (`.mov`) video in Godot 4. The extension decodes
 Hap frames, uploads their GPU-compressed texture data, and exposes them through
 Godot's `VideoStreamPlayer` or a `HapPlayer` node for direct control.
+Embedded signed 16/24-bit PCM audio plays through Godot's audio buses.
 
 ## Install and play a video
 
@@ -63,10 +64,14 @@ through `user://` or an absolute path.
 | `stream` | `HapVideoStream` | `null` | Stream to open. Assigning one starts an asynchronous open. |
 | `loop` | `bool` | `false` | Wrap when playback reaches an end. |
 | `playback_speed` | `float` | `1.0` | Playback rate. A negative value plays backwards. |
+| `bus` | `StringName` | `"Master"` | Godot audio bus for embedded PCM. |
+| `volume_db` | `float` | `0.0` | Embedded PCM volume in decibels. |
 | `autoplay` | `bool` | `false` | Start playing after the stream opens. |
 | `stream_position` | `float` | `0.0` | Current position in seconds. Setting it seeks. |
 | `paused` | `bool` | `false` | Pause without discarding the current texture. |
 | `frame_rate`, `width`, `height`, `duration`, `frame_count` | read-only | `0` before open | Track metadata, valid after `opened`. |
+| `has_audio` | read-only `bool` | `false` | Whether the first embedded audio track is supported PCM. |
+| `audio_sample_rate`, `audio_channels` | read-only `int` | `0` | Source PCM rate and channel count; zero when audio is unavailable. |
 
 Methods:
 
@@ -129,6 +134,38 @@ MOV container.
 Chunked Hap frames are supported. The demuxer can validate sample offsets
 beyond 4 GB, and files are read through a memory map.
 
+### Embedded PCM audio
+
+Both players support the **first audio track only** (index `0`), with:
+
+- Signed, packed, interleaved **16-bit or 24-bit integer PCM**, mono or stereo.
+  Mono is duplicated to left and right; stereo channels remain distinct.
+- Integer sample rates from **8,000 to 192,000 Hz**.
+- QuickTime `sowt`, `twos`, and `in24` version 0/1 sample entries, including
+  `wave`/`enda` byte-order metadata, and version 2 `lpcm` entries with explicit
+  signed/packed/interleaved layout flags. Little- and big-endian PCM are supported.
+- Constant-size PCM packets with consistent timing and packet geometry. No edit
+  list, an identity edit, or one forward trim with an optional leading empty
+  edit is supported. Audio outside that presentation window is silent.
+
+AAC, MP3, ALAC, floating-point PCM, unsigned PCM, planar/padded layouts,
+multichannel audio, and more complex edit lists are not supported. An unsupported
+audio track produces a warning and leaves Hap video usable; the loader does not
+fall back to another audio track. There is **no AAC decoder**, FFmpeg, or GStreamer
+runtime dependency.
+
+`HapPlayer` outputs audio only while playing forwards at `playback_speed == 1.0`.
+Pause, stop, frame stepping, reverse, and other speeds silence it; seeks and loops
+discard stale queued sound. Use `bus` and `volume_db` to route and control volume.
+The stock `VideoStreamPlayer` uses its own `bus`, `volume_db`, pause, seek, and
+loop controls. Its `speed_scale` is handled by Godot's pitch-changing resampler
+and does not have `HapPlayer`'s non-1x mute policy. Selecting `audio_track` other
+than `0` disables audio rather than selecting another embedded track.
+
+Audio synchronization is pragmatic, roughly **100 ms** on normal devices, not
+sample-exact or gapless. Long main-thread stalls drop stale sound instead of
+playing it late; unusually large device latency can worsen synchronization.
+
 ## Architecture
 
 The Godot-facing layer registers `HapVideoStream`, a `.mov` resource loader,
@@ -146,10 +183,15 @@ Hap1, Hap5, and Hap7 use GPU-compressed uploads. HapY and HapM upload their
 compressed inputs, then run a YCoCg-to-RGBA compute pass. `get_texture()`
 returns the stable `Texture2DRD` wrapper used for presentation.
 
+PCM is converted from mapped media in bounded batches on the main thread and
+copied into Godot's audio buffers. The extension does not decode/read mapped media
+on the audio thread or load an entire PCM track into memory. Constant-size audio
+sample tables stay compact rather than allocating one index record per PCM frame.
+
 ## Limitations and diagnostics
 
-- This is video-only. An audio track in a MOV file is skipped while the Hap
-  video track is used.
+- Audio support is limited to the PCM layouts and playback policies above;
+  unsupported audio warns without failing video playback.
 - HapA and Hap HDR are rejected. Supported FourCCs are `Hap1`, `Hap5`,
   `HapY`, `HapM`, and `Hap7`.
 - The Compatibility/OpenGL renderer and headless presentation are not
@@ -190,7 +232,7 @@ and nullable-Ref ptrcall fixes previously carried by our fork. Its bundled
 Godot API and interface header let you build the extension and cross-compile
 without installing Godot.
 
-`run` and `smoke` need Godot 4.6 or newer. Install Godot separately
+`run`, `smoke`, and `audio-smoke` need Godot 4.6 or newer. Install Godot separately
 (for example, with `gdvm`). These commands use
 `-Dgodot-path`, then `GODOT_PATH`, then `godot` on `PATH`. Godot is no longer
 downloaded by the build, and `-Dgodot-version` is no longer supported:
@@ -208,7 +250,13 @@ pick a Godot version for you. CI still tests both 4.6.3 and 4.7.1.
 To regenerate the media fixtures from the project root, run
 `bash scripts/generate_fixtures.sh`. This requires Python 3 and FFmpeg built
 with `--enable-libsnappy` for Hap encoding. The fixture files under
-`tests/fixtures/` are committed for tests.
+`tests/fixtures/` are committed for tests. The additional stereo PCM fixtures
+need **only Python 3**, reusing committed Hap video without an encoder:
+
+```bash
+python3 scripts/generate_pcm_fixtures.py
+python3 scripts/generate_pcm_fixtures.py --check
+```
 
 The development build installs the library into `project/lib/` and uses
 `project/hap_video.gdextension`, which is separate from the release addon
@@ -217,7 +265,8 @@ manifest. Useful commands:
 ```bash
 zig build                         # build the development extension
 zig build run                     # build, then run the development demo
-zig build smoke                   # build, then open and present the bundled fixture
+zig build smoke                   # build, then run video and audio smokes serially
+zig build audio-smoke             # same prerequisites, ending with PCM capture checks
 zig build test -Dtest-optimize=debug # core tests with Zig runtime safety checks
 zig build test -Dsanitize-c=full  # core tests with C/C++ UBSan
 ```
@@ -227,6 +276,18 @@ checks that the extension can open the bundled Hap fixture, present a frame,
 expose metadata, seek, preserve playback after a rejected replacement, and
 release stream references. It requires a RenderingDevice and checks for the
 script's completion marker rather than relying on Godot's exit code alone.
+It then runs `project/audio_smoke.tscn` with a real audio driver, capturing PCM
+upstream of a muted sink bus, so it does not play audible sound. This checks mono
+duplication, stereo16/24 big-endian conversion and normalization, changing
+seek/loop content, pause/speed/volume/bus controls, completion and teardown, and
+video-only fallback for synthetic unsupported audio metadata. Regressions also
+cover generator lifetime while an old playback is retained, paused stock-player
+starts/restarts, the first PCM after a no-seek audio-track restore, and terminal
+video-decode failure with looping enabled. The latter corrupts a late video frame
+in a temporary MOV without changing PCM or sample tables; its decoder error log
+is expected. The two scenes
+run serially and must both print their completion markers; `--headless` or a
+dummy audio driver cannot validate these presentation/capture checks.
 
 On Godot 4.6, this upstream revision logs missing 4.7 interface probes (`variant_get_type_by_name`, `classdb_construct_object3`,
 `classdb_register_extension_class6`) at startup; the 4.6 fallback still runs
@@ -237,7 +298,7 @@ and the smoke test passes.
 | Path | Contents |
 | --- | --- |
 | `addon/` | Release GDExtension manifest. |
-| `project/` | Development demo, smoke scene, fixture MOV, and development manifest. |
+| `project/` | Development demo, video/audio smoke scenes, fixture MOV, and development manifest. |
 | `src/core/` | Godot-independent MOV demuxing, Hap decode, scheduling, and tests. |
 | `src/godot/` | GDExtension classes, resource loader, playback adapter, and GPU presenter. |
 | `thirdparty/` | Vendored Hap, minimp4, and Snappy sources, plus third-party license notices (including gdzig). |

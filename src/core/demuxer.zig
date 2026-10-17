@@ -7,8 +7,10 @@
 //! codecs. Tracks are classified by stsd FourCC, not handler_type, to
 //! sidestep minimp4's dual-hdlr bug.
 //!
-//! All frame offsets/sizes are validated and cached at open time for O(1)
-//! random access and SIGBUS mitigation.
+//! All video frame offsets/sizes are validated and cached at open time for
+//! O(1) random access and SIGBUS mitigation. Optional embedded PCM uses an
+//! independently owned compact chunk index; unsupported audio is a warning,
+//! not a video-open error.
 //!
 //! Interop note: minimp4's MP4D_demux_t/MP4D_track_t structs are large and
 //! their layout depends on build-time switches (MINIMP4_ALLOW_64BIT,
@@ -24,6 +26,7 @@ const std = @import("std");
 
 const hap_frame = @import("hap_frame.zig");
 const mmap_reader = @import("mmap_reader.zig");
+const pcm_audio = @import("pcm_audio.zig");
 
 const MmapReader = mmap_reader.MmapReader;
 const FourCC = hap_frame.FourCC;
@@ -36,7 +39,7 @@ const StsdResult = hap_frame.StsdResult;
 // minimp4 shim C ABI -- extern decls for minimp4_shim.h, hand-declared (no
 // @cImport, per project convention).
 // -----------------------------------------------------------------------
-const Mp4Ctx = opaque {};
+const Mp4Ctx = pcm_audio.Mp4Ctx;
 
 extern fn hap_mp4d_open(data: [*]const u8, size: i64) ?*Mp4Ctx;
 extern fn hap_mp4d_close(ctx: ?*Mp4Ctx) void;
@@ -119,8 +122,9 @@ const BoxIter = struct {
     end: u64,
 
     fn next(it: *BoxIter) ?BoxHeader {
-        if (it.pos + 8 > it.end) return null;
+        if (it.pos > it.end or it.end - it.pos < 8) return null;
         const child = readBoxHeader(it.file_data, it.pos) orelse return null;
+        if (child.size > it.end - it.pos) return null;
         it.pos += child.size;
         return child;
     }
@@ -186,10 +190,13 @@ pub const Demuxer = struct {
     valid: bool = false,
     track: VideoTrackInfo = .{},
     samples: std.ArrayListUnmanaged(SampleEntry) = .empty,
+    audio: ?pcm_audio.Source = null,
+    audio_warning: ?pcm_audio.AudioWarning = null,
 
-    /// Releases the minimp4 context and the cached sample table. Safe to
-    /// call on a zero-value/already-deinited Demuxer.
+    /// Releases the PCM index, minimp4 context and cached video sample table.
+    /// Safe to call on a zero-value/already-deinited Demuxer.
     pub fn deinit(self: *Demuxer, allocator: std.mem.Allocator) void {
+        if (self.audio) |*audio| audio.deinit();
         self.cleanupMp4();
         self.samples.deinit(allocator);
         self.* = .{};
@@ -290,6 +297,9 @@ pub const Demuxer = struct {
     /// UnsupportedHapVariant, the offending fourcc is left on
     /// `self.track.fourcc`). The reader must outlive the Demuxer.
     pub fn open(self: *Demuxer, allocator: std.mem.Allocator, reader: *const MmapReader) OpenError!void {
+        if (self.audio) |*audio| audio.deinit();
+        self.audio = null;
+        self.audio_warning = null;
         self.cleanupMp4();
         self.samples.clearRetainingCapacity();
         self.track = .{};
@@ -388,5 +398,9 @@ pub const Demuxer = struct {
         }
 
         self.valid = true;
+        self.audio = pcm_audio.Source.open(allocator, file_data, ctx, track_index) catch |err| blk: {
+            self.audio_warning = pcm_audio.warningFor(err);
+            break :blk null;
+        };
     }
 };

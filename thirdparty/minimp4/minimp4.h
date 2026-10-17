@@ -260,6 +260,8 @@ typedef struct
     /************************************************************************/
     /*                 private data: MP4 indexes                            */
     /************************************************************************/
+    // Constant stsz tables need no per-sample allocation (notably PCM).
+    unsigned constant_sample_size;
     unsigned *entry_size;
 
     unsigned sample_to_chunk_count;
@@ -273,7 +275,7 @@ typedef struct
     // caller in this codebase uses -- see sample_to_chunk()'s comment).
     unsigned stc_cache_group;
     unsigned stc_cache_nc;
-    unsigned stc_cache_sum;
+    uint64_t stc_cache_sum;
 
     // MP4D_frame_offset()'s in-chunk byte-offset resume point -- see that
     // function's comment. Independent of stc_cache_* above: this caches
@@ -285,14 +287,11 @@ typedef struct
     MP4D_file_offset_t fo_cache_offset;
 
 #if MP4D_TIMESTAMPS_SUPPORTED
-    unsigned *timestamp;
-    unsigned *duration;
-    // Allocated length of timestamp/duration, tracked separately from any
-    // publicly exposed sample count: a malformed file's stsz sample_count
-    // can exceed the total sample count its own stts box declared, and
-    // MP4D_frame_offset() must bound-check against what was actually
-    // allocated, not what stsz merely claims.
-    unsigned timestamp_count;
+    struct MP4D_timing_run_t_tag *timing_run;
+    unsigned timing_run_count;
+    // These may exceed the 32-bit sample count / legacy timestamp API.
+    uint64_t timing_sample_count;
+    uint64_t timing_duration;
 #endif
 
 } MP4D_track_t;
@@ -340,6 +339,15 @@ struct MP4D_sample_to_chunk_t_tag
 {
     unsigned first_chunk;
     unsigned samples_per_chunk;
+    unsigned sample_description_index;
+};
+
+struct MP4D_timing_run_t_tag
+{
+    unsigned sample_count;
+    unsigned duration;
+    uint64_t first_sample;
+    uint64_t first_timestamp;
 };
 
 typedef struct
@@ -2490,6 +2498,8 @@ exit_with_free:
 static int minimp4_fgets(MP4D_demux_t *mp4)
 {
     uint8_t c;
+    if (mp4->read_pos < 0 || mp4->read_pos >= mp4->read_size)
+        return -1;
     if (mp4->read_callback(mp4->read_pos, &c, 1, mp4->token))
         return -1;
     mp4->read_pos++;
@@ -2502,18 +2512,17 @@ static int minimp4_fgets(MP4D_demux_t *mp4)
 */
 static unsigned minimp4_read(MP4D_demux_t *mp4, int nb, int *eof_flag)
 {
-    uint32_t v = 0; int last_byte;
-    switch (nb)
+    uint32_t v = 0;
+    int i;
+    for (i = 0; i < nb; i++)
     {
-    case 4: v = (v << 8) | minimp4_fgets(mp4);
-    case 3: v = (v << 8) | minimp4_fgets(mp4);
-    case 2: v = (v << 8) | minimp4_fgets(mp4);
-    default:
-    case 1: v = (v << 8) | (last_byte = minimp4_fgets(mp4));
-    }
-    if (last_byte < 0)
-    {
-        *eof_flag = 1;
+        int c = minimp4_fgets(mp4);
+        if (c < 0)
+        {
+            *eof_flag = 1;
+            return 0;
+        }
+        v = (v << 8) | (unsigned)c;
     }
     return v;
 }
@@ -2527,7 +2536,8 @@ static uint32_t read_payload(MP4D_demux_t *mp4, unsigned nb, boxsize_t *payload_
     if (*payload_bytes < nb)
     {
         *eof_flag = 1;
-        nb = (int)*payload_bytes;
+        *payload_bytes = 0;
+        return 0;
     }
     *payload_bytes -= nb;
 
@@ -2540,7 +2550,14 @@ static uint32_t read_payload(MP4D_demux_t *mp4, unsigned nb, boxsize_t *payload_
 */
 static void my_fseek(MP4D_demux_t *mp4, boxsize_t pos, int *eof_flag)
 {
-    mp4->read_pos += pos;
+    if (mp4->read_pos < 0 || mp4->read_pos > mp4->read_size ||
+        (uint64_t)pos > (uint64_t)(mp4->read_size - mp4->read_pos))
+    {
+        mp4->read_pos = mp4->read_size;
+        *eof_flag = 1;
+        return;
+    }
+    mp4->read_pos += (int64_t)pos;
     if (mp4->read_pos >= mp4->read_size)
         *eof_flag = 1;
 }
@@ -2573,6 +2590,33 @@ static void *minimp4_bounded_malloc(size_t size)
 // populated would leak the earlier block. free() is a no-op on NULL, so
 // this is free for the (common) single-occurrence case.
 #define MALLOC(t, p, size) { free(p); p = (t)minimp4_bounded_malloc(size); if (!(p)) { ERROR("out of memory"); } }
+
+// Index tables share the existing ceiling across all tracks, rather than
+// each getting a fresh 256 MiB allowance. Reset duplicate pointers/counts
+// together, including zero-length tables; allocation errors close the demuxer.
+// The allocation budget is local to MP4D_open; tables live until close.
+#define TABLE_ALLOC(t, p, count, n) {                                      \
+    uint64_t table_count = (n);                                           \
+    uint64_t table_bytes = table_count * sizeof(*(p));                     \
+    if (p) { table_alloc_bytes -= (uint64_t)(count) * sizeof(*(p)); }       \
+    free(p); p = NULL; count = 0;                                         \
+    if (table_bytes > MINIMP4_MAX_ALLOC_BYTES - table_alloc_bytes)          \
+        RETURN_ERROR("index tables too large");                           \
+    if (table_bytes) {                                                    \
+        p = (t)malloc((size_t)table_bytes);                               \
+        if (!(p)) { RETURN_ERROR("out of memory"); }                       \
+        table_alloc_bytes += table_bytes;                                \
+    }                                                                    \
+    count = (unsigned)table_count;                                       \
+}
+
+static int minimp4_table_fits(const MP4D_demux_t *mp4, boxsize_t payload_bytes,
+                             uint64_t bytes)
+{
+    return bytes <= payload_bytes && mp4->read_pos >= 0 &&
+           mp4->read_pos <= mp4->read_size &&
+           bytes <= (uint64_t)(mp4->read_size - mp4->read_pos);
+}
 
 /*
 *   On error: release resources.
@@ -2617,8 +2661,9 @@ int MP4D_open(MP4D_demux_t *mp4, int (*read_callback)(int64_t offset, void *buff
     int eof_flag = 0;
     unsigned i;
     MP4D_track_t *tr = NULL;
+    uint64_t table_alloc_bytes = 0;
 
-    if (!mp4 || !read_callback)
+    if (!mp4 || !read_callback || file_size < 0)
     {
         TRACE(("\nERROR: invlaid arguments!"));
         return 0;
@@ -2855,7 +2900,8 @@ broken_android_meta_hack:
         case BOX_stsz:
             {
                 int size = 0;
-                uint32_t sample_size;
+                uint32_t sample_size, sample_count;
+                uint64_t table_bytes;
                 // Hardening fix: g_fullbox[]'s use_track_flag check only
                 // hard-aborts via RETURN_ERROR at depth > 0 -- at depth 0
                 // (this box appearing with no enclosing moov/trak) ERROR()
@@ -2865,19 +2911,37 @@ broken_android_meta_hack:
                 // "stsz" box.
                 if (!tr)
                     break;
+                if (eof_flag || !minimp4_table_fits(mp4, payload_bytes, 8))
+                    RETURN_ERROR("truncated sample size table");
                 sample_size = READ(4);
-                tr->sample_count = READ(4);
-                // (uint64_t) cast: sample_count*4 as native 32-bit
-                // arithmetic can itself overflow/wrap before reaching
-                // minimp4_bounded_malloc's size check, allocating far
-                // fewer bytes than the loop below then writes -- a
-                // fuzzer-found heap-buffer-overflow.
-                MALLOC(unsigned int*, tr->entry_size, (uint64_t)tr->sample_count*4);
+                sample_count = READ(4);
+                if (box_name == BOX_stsz)
+                    table_bytes = sample_size ? 0 : (uint64_t)sample_count * 4;
+                else
+                {
+                    unsigned bits = sample_size & 0xFF;
+                    if (bits != 4 && bits != 8 && bits != 16)
+                        RETURN_ERROR("invalid compact sample size field");
+                    table_bytes = ((uint64_t)sample_count * bits + 7) / 8;
+                }
+                if (eof_flag || !minimp4_table_fits(mp4, payload_bytes, table_bytes))
+                    RETURN_ERROR("truncated sample size table");
+
+                tr->fo_cache_valid = 0;
+                tr->constant_sample_size = 0;
+                if (box_name == BOX_stsz && sample_size)
+                {
+                    TABLE_ALLOC(unsigned int*, tr->entry_size, tr->sample_count, 0);
+                    tr->constant_sample_size = sample_size;
+                    tr->sample_count = sample_count;
+                    break;
+                }
+                TABLE_ALLOC(unsigned int*, tr->entry_size, tr->sample_count, sample_count);
                 for (i = 0; i < tr->sample_count; i++)
                 {
                     if (box_name == BOX_stsz)
                     {
-                       tr->entry_size[i] = (sample_size?sample_size:READ(4));
+                        tr->entry_size[i] = READ(4);
                     } else
                     {
                         switch (sample_size & 0xFF)
@@ -2901,26 +2965,40 @@ broken_android_meta_hack:
                         }
                     }
                 }
+                if (eof_flag)
+                    RETURN_ERROR("truncated sample size table");
             }
             break;
 
         case BOX_stsc:  //ISO/IEC 14496-12 Page 38. Section 8.18 - Sample To Chunk Box.
+        {
+            unsigned count;
             // Same depth-0 use_track_flag gap as BOX_stsz above.
             if (!tr)
                 break;
-            tr->sample_to_chunk_count = READ(4);
-            MALLOC(MP4D_sample_to_chunk_t*, tr->sample_to_chunk, tr->sample_to_chunk_count*sizeof(tr->sample_to_chunk[0]));
+            if (eof_flag || !minimp4_table_fits(mp4, payload_bytes, 4))
+                RETURN_ERROR("truncated sample to chunk table");
+            count = READ(4);
+            if (eof_flag || !minimp4_table_fits(mp4, payload_bytes, (uint64_t)count * 12))
+                RETURN_ERROR("truncated sample to chunk table");
+            TABLE_ALLOC(MP4D_sample_to_chunk_t*, tr->sample_to_chunk, tr->sample_to_chunk_count, count);
+            tr->stc_cache_group = tr->stc_cache_nc = 0;
+            tr->stc_cache_sum = 0;
+            tr->fo_cache_valid = 0;
             for (i = 0; i < tr->sample_to_chunk_count; i++)
             {
                 tr->sample_to_chunk[i].first_chunk = READ(4);
                 tr->sample_to_chunk[i].samples_per_chunk = READ(4);
-                SKIP(4);    // sample_description_index
+                tr->sample_to_chunk[i].sample_description_index = READ(4);
             }
+            if (eof_flag)
+                RETURN_ERROR("truncated sample to chunk table");
             break;
+        }
 #if MP4D_TRACE_TIMESTAMPS || MP4D_TIMESTAMPS_SUPPORTED
         case BOX_stts:
             {
-                unsigned count, j, k = 0, ts = 0, ts_capacity;
+                unsigned count;
                 // Hardening fix: g_fullbox[] registers BOX_stts with
                 // use_track_flag=0 (no active-track requirement enforced
                 // before this case runs), but the MP4D_TIMESTAMPS_SUPPORTED
@@ -2930,113 +3008,79 @@ broken_android_meta_hack:
                 // found this as a null-pointer deref from an 8-byte file.
                 if (!tr)
                     break;
+                if (eof_flag || !minimp4_table_fits(mp4, payload_bytes, 4))
+                    RETURN_ERROR("truncated timing table");
                 count = READ(4);
-                ts_capacity = count;
+                if (eof_flag || !minimp4_table_fits(mp4, payload_bytes, (uint64_t)count * 8))
+                    RETURN_ERROR("truncated timing table");
 #if MP4D_TIMESTAMPS_SUPPORTED
-                // (uint64_t) cast: same native-arithmetic-overflow gap as
-                // BOX_stsz's entry_size MALLOC above, on this box's own
-                // unbounded, file-declared count.
-                MALLOC(unsigned int*, tr->timestamp, (uint64_t)ts_capacity*4);
-                MALLOC(unsigned int*, tr->duration, (uint64_t)ts_capacity*4);
-                tr->timestamp_count = 0;
+                TABLE_ALLOC(struct MP4D_timing_run_t_tag*, tr->timing_run, tr->timing_run_count, count);
+                tr->timing_sample_count = 0;
+                tr->timing_duration = 0;
 #endif
 
                 for (i = 0; i < count; i++)
                 {
                     unsigned sc = READ(4);
-                    int d =  READ(4);
-                    uint64_t new_k = (uint64_t)k + sc; // avoid 32-bit wraparound below
-                    TRACE(("sample %8d count %8d duration %8d\n", i, sc, d));
+                    unsigned d = READ(4);
+                    TRACE(("sample %8u count %8u duration %8u\n", i, sc, d));
+                    (void)sc;
+                    (void)d;
 #if MP4D_TIMESTAMPS_SUPPORTED
-                    if (new_k > ts_capacity)
-                    {
-                        // sc is an attacker-controlled per-entry sample
-                        // count; k + sc as plain "unsigned" arithmetic can
-                        // wrap past ts_capacity, skipping this resize while
-                        // the write loop below still walks `sc` entries --
-                        // a fuzzer-found heap-buffer-overflow. Widening the
-                        // addition avoids the wrap.
-                        //
-                        // Growing to exactly new_k on every entry (rather
-                        // than with slack) meant a file with many entries
-                        // that each grow the running total by only a
-                        // little forced a full realloc -- and full copy --
-                        // on every single one: a fuzzer-found multi-second
-                        // "realloc thrashing" hang distinct from a single
-                        // oversized allocation. Double capacity instead
-                        // (still bounded to MINIMP4_MAX_ALLOC_BYTES, which
-                        // is what catches the ~16GB single-request case
-                        // fuzzing also found), same amortized-growth
-                        // rationale as std::vector.
-                        //
-                        // Checking the bound *before* reallocating matters
-                        // too: rejecting after the fact would mean
-                        // overwriting one perfectly good pointer (from the
-                        // MALLOC above) with the other realloc's NULL
-                        // result, leaking the one that had succeeded.
-                        // Leaving both pointers untouched on rejection lets
-                        // MP4D_close() free them normally, same as any
-                        // other error path.
-                        uint64_t new_capacity = (uint64_t)ts_capacity * 2;
-                        if (new_capacity < new_k)
-                            new_capacity = new_k;
-                        if (new_capacity * sizeof(unsigned) > MINIMP4_MAX_ALLOC_BYTES)
-                            new_capacity = MINIMP4_MAX_ALLOC_BYTES / sizeof(unsigned);
-                        if (new_capacity < new_k)
-                        {
-                            ERROR("out of memory");
-                        }
-                        ts_capacity = (unsigned)new_capacity;
-                        tr->timestamp = (unsigned int*)realloc(tr->timestamp, ts_capacity * sizeof(unsigned));
-                        tr->duration  = (unsigned int*)realloc(tr->duration,  ts_capacity * sizeof(unsigned));
-                        if (!tr->timestamp || !tr->duration)
-                        {
-                            ERROR("out of memory");
-                        }
-                    }
-                    for (j = 0; j < sc; j++)
-                    {
-                        tr->duration[k] = d;
-                        tr->timestamp[k++] = ts;
-                        ts += d;
-                    }
-                    tr->timestamp_count = k;
+                    uint64_t run_duration = (uint64_t)sc * d;
+                    if (UINT64_MAX - tr->timing_sample_count < sc ||
+                        UINT64_MAX - tr->timing_duration < run_duration)
+                        RETURN_ERROR("timing table overflow");
+                    tr->timing_run[i].sample_count = sc;
+                    tr->timing_run[i].duration = d;
+                    tr->timing_run[i].first_sample = tr->timing_sample_count;
+                    tr->timing_run[i].first_timestamp = tr->timing_duration;
+                    tr->timing_sample_count += sc;
+                    tr->timing_duration += run_duration;
 #endif
                 }
+                if (eof_flag)
+                    RETURN_ERROR("truncated timing table");
             }
             break;
         case BOX_ctts:
             {
                 unsigned count = READ(4);
+                // Bound against both the declared payload and real input:
+                // EOF must not turn a huge count into a zero-padding loop.
+                if (eof_flag || !minimp4_table_fits(mp4, payload_bytes, (uint64_t)count * 8))
+                    RETURN_ERROR("truncated composition timing table");
                 for (i = 0; i < count; i++)
                 {
                     int sc, d;
-                    // count is an unbounded, file-declared value with no
-                    // backing allocation to size-check against (unlike
-                    // stsz/stsc/stco/stts above); once the box's actual
-                    // payload is exhausted, READ() keeps returning
-                    // zero-padding forever rather than stopping the loop,
-                    // so a file can claim ~4 billion entries in a few
-                    // bytes on disk. Fuzzer found this as a multi-second
-                    // hang (pure wasted CPU, not memory-unsafe on its own).
-                    if (payload_bytes == 0)
-                        break;
                     sc = READ(4);
                     d =  READ(4);
                     (void)sc;
                     (void)d;
                     TRACE(("sample %8d count %8d decoding to composition offset %8d\n", i, sc, d));
                 }
+                if (eof_flag)
+                    RETURN_ERROR("truncated composition timing table");
             }
             break;
 #endif
         case BOX_stco:  //ISO/IEC 14496-12 Page 39. Section 8.19 - Chunk Offset Box.
         case BOX_co64:
+        {
+            unsigned count;
             // Same depth-0 use_track_flag gap as BOX_stsz above.
             if (!tr)
                 break;
-            tr->chunk_count = READ(4);
-            MALLOC(MP4D_file_offset_t*, tr->chunk_offset, tr->chunk_count*sizeof(MP4D_file_offset_t));
+            if (eof_flag || !minimp4_table_fits(mp4, payload_bytes, 4))
+                RETURN_ERROR("truncated chunk offset table");
+            count = READ(4);
+            if (eof_flag || !minimp4_table_fits(mp4, payload_bytes,
+                                              (uint64_t)count * (box_name == BOX_co64 ? 8 : 4)))
+                RETURN_ERROR("truncated chunk offset table");
+            TABLE_ALLOC(MP4D_file_offset_t*, tr->chunk_offset, tr->chunk_count, count);
+            tr->stc_cache_group = tr->stc_cache_nc = 0;
+            tr->stc_cache_sum = 0;
+            tr->fo_cache_valid = 0;
             for (i = 0; i < tr->chunk_count; i++)
             {
                 tr->chunk_offset[i] = READ(4);
@@ -3055,7 +3099,10 @@ broken_android_meta_hack:
                     tr->chunk_offset[i] |= READ(4);
                 }
             }
+            if (eof_flag)
+                RETURN_ERROR("truncated chunk offset table");
             break;
+        }
 
 #if MP4D_INFO_SUPPORTED
         case BOX_mvhd:
@@ -3377,11 +3424,13 @@ broken_android_meta_hack:
 
 /**
 *   Find chunk, containing given sample.
-*   Returns chunk number, and first sample in this chunk.
+*   Returns success, writing chunk number and first sample in this chunk.
 */
-static int sample_to_chunk(MP4D_track_t *tr, unsigned nsample, unsigned *nfirst_sample_in_chunk)
+static int sample_to_chunk(MP4D_track_t *tr, unsigned nsample,
+                           unsigned *nchunk, unsigned *nfirst_sample_in_chunk)
 {
-    unsigned chunk_group, nc, sum;
+    unsigned chunk_group, nc;
+    uint64_t sum;
     *nfirst_sample_in_chunk = 0;
     if (tr->chunk_count == 0)
     {
@@ -3390,11 +3439,12 @@ static int sample_to_chunk(MP4D_track_t *tr, unsigned nsample, unsigned *nfirst_
         // original "<= 1" fast path treated this the same as the legitimate
         // single-chunk case and returned chunk 0, which made callers index
         // into a chunk_offset array that was never allocated.
-        return -1;
+        return 0;
     }
     if (tr->chunk_count == 1)
     {
-        return 0;
+        *nchunk = 0;
+        return 1;
     }
     if (!tr->sample_to_chunk || tr->sample_to_chunk_count == 0)
     {
@@ -3404,8 +3454,10 @@ static int sample_to_chunk(MP4D_track_t *tr, unsigned nsample, unsigned *nfirst_
         // tr->sample_to_chunk[chunk_group] unconditionally on its very
         // first iteration regardless of tr->sample_to_chunk_count --
         // fuzzer found the NULL case as a null-pointer deref.
-        return -1;
+        return 0;
     }
+    if (tr->sample_to_chunk[0].first_chunk != 1)
+        return 0;
 
     // Sequential demuxing queries nsample in strictly increasing order,
     // once per sample -- rescanning from nc=0 every time (the original
@@ -3414,13 +3466,13 @@ static int sample_to_chunk(MP4D_track_t *tr, unsigned nsample, unsigned *nfirst_
     // found this as a multi-second hang from a crafted file with a
     // large-but-not-otherwise-invalid chunk count. Resume from the last
     // call's stopping point whenever this query doesn't need to look
-    // earlier than it did.
+    // earlier than it did. Skip whole stsc groups arithmetically, so even
+    // random access into a long constant-size track need not scan chunks.
     if (nsample >= tr->stc_cache_sum && tr->stc_cache_nc < tr->chunk_count)
     {
         chunk_group = tr->stc_cache_group;
         nc = tr->stc_cache_nc;
         sum = tr->stc_cache_sum;
-        *nfirst_sample_in_chunk = sum;
     }
     else
     {
@@ -3429,42 +3481,102 @@ static int sample_to_chunk(MP4D_track_t *tr, unsigned nsample, unsigned *nfirst_
         sum = 0;
     }
 
-    for (; nc < tr->chunk_count; nc++)
+    while (nc < tr->chunk_count)
     {
-        if (chunk_group + 1 < tr->sample_to_chunk_count     // stuck at last entry till EOF
-            && nc + 1 ==    // Chunks counted starting with '1'
-            tr->sample_to_chunk[chunk_group + 1].first_chunk)    // next group?
+        unsigned end_chunk = tr->chunk_count;
+        unsigned samples_per_chunk;
+        uint64_t group_samples;
+        if (chunk_group + 1 < tr->sample_to_chunk_count)
         {
-            chunk_group++;
+            unsigned next = tr->sample_to_chunk[chunk_group + 1].first_chunk;
+            if (next <= tr->sample_to_chunk[chunk_group].first_chunk)
+                return 0;
+            if (nc >= next - 1)
+            {
+                chunk_group++;
+                continue;
+            }
+            if (next - 1 < end_chunk)
+                end_chunk = next - 1;
         }
-
-        sum += tr->sample_to_chunk[chunk_group].samples_per_chunk;
-        if (nsample < sum)
+        samples_per_chunk = tr->sample_to_chunk[chunk_group].samples_per_chunk;
+        group_samples = (uint64_t)(end_chunk - nc) * samples_per_chunk;
+        if (UINT64_MAX - sum < group_samples)
+            return 0;
+        if (nsample < sum + group_samples)
         {
+            unsigned advance = (unsigned)(((uint64_t)nsample - sum) / samples_per_chunk);
+            sum += (uint64_t)advance * samples_per_chunk;
+            nc += advance;
+            *nfirst_sample_in_chunk = (unsigned)sum;
+            *nchunk = nc;
             tr->stc_cache_group = chunk_group;
             tr->stc_cache_nc = nc + 1;
-            tr->stc_cache_sum = sum;
-            return nc;
+            tr->stc_cache_sum = sum + samples_per_chunk;
+            return 1;
         }
-
-        *nfirst_sample_in_chunk = sum;
+        sum += group_samples;
+        nc = end_chunk;
     }
 
     tr->stc_cache_group = chunk_group;
     tr->stc_cache_nc = nc;
     tr->stc_cache_sum = sum;
-    return -1;
+    return 0;
 }
+
+#if MP4D_TIMESTAMPS_SUPPORTED
+static void sample_timing(const MP4D_track_t *tr, unsigned nsample,
+                          unsigned *timestamp, unsigned *duration)
+{
+    unsigned lo = 0, hi = tr->timing_run_count;
+    if (!tr->timing_run || (uint64_t)nsample >= tr->timing_sample_count)
+        return;
+    // Find the first run whose exclusive sample end exceeds nsample.
+    // Empty runs are allowed and naturally skipped by this search.
+    while (lo < hi)
+    {
+        unsigned mid = lo + (hi - lo) / 2;
+        const struct MP4D_timing_run_t_tag *run = tr->timing_run + mid;
+        if ((uint64_t)nsample >= run->first_sample + run->sample_count)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (lo < tr->timing_run_count)
+    {
+        const struct MP4D_timing_run_t_tag *run = tr->timing_run + lo;
+        // The legacy API intentionally returns the low 32 timestamp bits,
+        // matching the old unsigned per-sample accumulator's wraparound.
+        if (timestamp)
+            *timestamp = (uint32_t)(run->first_timestamp +
+                         ((uint64_t)nsample - run->first_sample) * run->duration);
+        if (duration)
+            *duration = run->duration;
+    }
+}
+#endif
 
 // Exported API function
 MP4D_file_offset_t MP4D_frame_offset(const MP4D_demux_t *mp4, unsigned ntrack, unsigned nsample, unsigned *frame_bytes, unsigned *timestamp, unsigned *duration)
 {
-    MP4D_track_t *tr = mp4->track + ntrack;
-    unsigned ns;
-    int nchunk = sample_to_chunk(tr, nsample, &ns);
+    MP4D_track_t *tr;
+    unsigned ns, nchunk, bytes;
     MP4D_file_offset_t offset;
+    const MP4D_file_offset_t max_offset = ~(MP4D_file_offset_t)0;
 
-    if (nchunk < 0 || !tr->chunk_offset || !tr->entry_size)
+    if (frame_bytes)
+        *frame_bytes = 0;
+    if (timestamp)
+        *timestamp = 0;
+    if (duration)
+        *duration = 0;
+    if (!mp4 || !mp4->track || ntrack >= mp4->track_count)
+        return 0;
+    tr = mp4->track + ntrack;
+    if (nsample >= tr->sample_count || !tr->chunk_offset ||
+        (!tr->constant_sample_size && !tr->entry_size) ||
+        !sample_to_chunk(tr, nsample, &nchunk, &ns))
     {
         // Hardening fix: chunk_count/sample_count and their matching
         // chunk_offset/entry_size arrays are set together within a single
@@ -3476,7 +3588,6 @@ MP4D_file_offset_t MP4D_frame_offset(const MP4D_demux_t *mp4, unsigned ntrack, u
         // own comments on this), so a later chunk_count/sample_count can
         // end up numerically valid while its array stayed NULL. Fuzzer
         // found this as a null-pointer deref.
-        *frame_bytes = 0;
         return 0;
     }
 
@@ -3487,7 +3598,16 @@ MP4D_file_offset_t MP4D_frame_offset(const MP4D_demux_t *mp4, unsigned ntrack, u
     // though sample_to_chunk() itself never has to rescan in that case.
     // Fuzzing found this as a multi-second hang distinct from (and not
     // fixed by) the sample_to_chunk() memoization.
-    if (tr->fo_cache_valid && nsample == tr->fo_cache_nsample + 1 && ns <= tr->fo_cache_nsample)
+    if (tr->constant_sample_size)
+    {
+        uint64_t delta = (uint64_t)(nsample - ns) * tr->constant_sample_size;
+        offset = tr->chunk_offset[nchunk];
+        if (delta > max_offset - offset)
+            return 0;
+        offset += (MP4D_file_offset_t)delta;
+    }
+    else if (tr->fo_cache_valid && nsample > tr->fo_cache_nsample &&
+             nsample - tr->fo_cache_nsample == 1 && ns <= tr->fo_cache_nsample)
     {
         offset = tr->fo_cache_offset;
         ns = nsample;
@@ -3497,39 +3617,29 @@ MP4D_file_offset_t MP4D_frame_offset(const MP4D_demux_t *mp4, unsigned ntrack, u
         offset = tr->chunk_offset[nchunk];
     }
 
-    for (; ns < nsample; ns++)
+    if (!tr->constant_sample_size)
     {
-        offset += tr->entry_size[ns];
+        for (; ns < nsample; ns++)
+        {
+            if (tr->entry_size[ns] > max_offset - offset)
+                return 0;
+            offset += tr->entry_size[ns];
+        }
     }
 
-    *frame_bytes = tr->entry_size[ns];
+    bytes = tr->constant_sample_size ? tr->constant_sample_size : tr->entry_size[nsample];
+    if (bytes > max_offset - offset)
+        return 0;
+    if (frame_bytes)
+        *frame_bytes = bytes;
 
     tr->fo_cache_valid = 1;
     tr->fo_cache_nsample = nsample;
-    tr->fo_cache_offset = offset + tr->entry_size[ns];
+    tr->fo_cache_offset = offset + bytes;
 
-    if (timestamp)
-    {
 #if MP4D_TIMESTAMPS_SUPPORTED
-        // Hardening fix: a track can have samples (from stsz) but no stts
-        // box at all, leaving tr->timestamp/tr->duration NULL from the
-        // MP4D_track_t's zero-init; or a malformed file's stsz sample_count
-        // can simply exceed the total sample count its own stts box
-        // declared, leaving `ns` past the end of both arrays even though
-        // they're non-NULL. Fuzzer found both as reads on a malformed file.
-        *timestamp = (tr->timestamp && ns < tr->timestamp_count) ? tr->timestamp[ns] : 0;
-#else
-        *timestamp = 0;
+    sample_timing(tr, nsample, timestamp, duration);
 #endif
-    }
-    if (duration)
-    {
-#if MP4D_TIMESTAMPS_SUPPORTED
-        *duration = (tr->duration && ns < tr->timestamp_count) ? tr->duration[ns] : 0;
-#else
-        *duration = 0;
-#endif
-    }
 
     return offset;
 }
@@ -3544,8 +3654,7 @@ void MP4D_close(MP4D_demux_t *mp4)
         MP4D_track_t *tr = mp4->track + --mp4->track_count;
         FREE(tr->entry_size);
 #if MP4D_TIMESTAMPS_SUPPORTED
-        FREE(tr->timestamp);
-        FREE(tr->duration);
+        FREE(tr->timing_run);
 #endif
         FREE(tr->sample_to_chunk);
         FREE(tr->chunk_offset);
