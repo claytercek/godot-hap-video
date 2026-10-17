@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/claytercek/godot-hap-video/compare/v0.3.0...v0.4.0) (2026-10-17)
+
+
+### Features
+
+* add embedded PCM audio playback ([85c7bdf](https://github.com/claytercek/godot-hap-video/commit/85c7bdfb4ddfee6af08c715b76561b90a21ce1aa))
+
 ## [0.3.0](https://github.com/claytercek/godot-hap-video/compare/v0.2.0...v0.3.0) (2026-08-04)
 
 
