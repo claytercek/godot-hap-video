@@ -1,0 +1,102 @@
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Source ref to build (defaults to the caller's SHA)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            targets: aarch64-macos x86_64-macos
+          - platform: linux
+            targets: x86_64-linux-gnu.2.31 aarch64-linux-gnu.2.31
+          - platform: windows
+            targets: x86_64-windows-gnu aarch64-windows-gnu
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      TARGETS: ${{ matrix.targets }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - name: Install LLVM for universal macOS libraries
+        if: matrix.platform == 'macos'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y llvm-18
+      - name: Build targets
+        run: |
+          mkdir -p staging ci-logs
+          # Thin macOS slices must not enter the uploaded staging directory.
+          if [[ "$PLATFORM" = macos ]]; then
+            mkdir -p macos-slices
+          fi
+          for target in $TARGETS; do
+            arch=${target%%-*}
+            log_target=$target
+            if [[ "$PLATFORM" = macos ]]; then
+              log_target=$arch
+            elif [[ "$arch" = aarch64 ]]; then
+              arch=arm64
+            fi
+            for mode in safe fast; do
+              flavor=debug
+              [ "$mode" = fast ] && flavor=release
+              zig build "-Dtarget=$target" "-Doptimize=$mode" --summary all 2>&1 | tee "ci-logs/$log_target-$mode.log"
+              case "$PLATFORM" in
+                macos)
+                  cp project/lib/libhap_video.dylib "macos-slices/libhap_video.macos-$arch.$flavor.dylib"
+                  ;;
+                linux)
+                  cp project/lib/libhap_video.so "staging/libhap_video.linux.$flavor.$arch.so"
+                  ;;
+                windows)
+                  cp project/lib/hap_video.dll "staging/hap_video.windows.$flavor.$arch.dll"
+                  ;;
+              esac
+            done
+          done
+          if [[ "$PLATFORM" = macos ]]; then
+            for flavor in debug release; do
+              output="staging/libhap_video.macos.$flavor.dylib"
+              llvm-lipo-18 -create \
+                "macos-slices/libhap_video.macos-aarch64.$flavor.dylib" \
+                "macos-slices/libhap_video.macos-x86_64.$flavor.dylib" \
+                -output "$output"
+              llvm-lipo-18 "$output" -verify_arch arm64 x86_64
+            done
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hap-video-${{ matrix.platform }}
+          path: staging/*
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-logs-${{ matrix.platform }}
+          path: ci-logs/*.log
+          if-no-files-found: warn

@@ -21,6 +21,9 @@ pub const AudioInfo = core.pcm_audio.AudioInfo;
 pub const batch_frames = 4096;
 pub const batches_per_update = 4;
 pub const lead_seconds = 0.06;
+// Cover queued audio plus a normal producer frame; Godot's existing ring still
+// bounds accepted stock audio. The generator keeps its separate lead budget.
+pub const stock_lead_seconds = 0.10;
 pub const drain_seconds = 0.10;
 
 pub fn frameAt(seconds: f64, rate: u32) u64 {
@@ -49,7 +52,7 @@ pub const Cursor = struct {
         const now = frameAt(position, rate);
         // A starved producer must catch up, not replay an old pending batch.
         self.next_frame = @max(self.next_frame, now);
-        const end = frameAt(@min(duration, position + lead_seconds), rate);
+        const end = frameAt(@min(duration, position + stock_lead_seconds), rate);
         return @intCast(@min(end -| self.next_frame, batch_frames));
     }
 };
@@ -65,7 +68,7 @@ pub const GeneratorOutput = struct {
     scratch: [batch_frames * 2]f32 = undefined,
     cursor: Cursor = .{},
     capacity: i32 = 0,
-    skips: i32 = 0,
+    draining_stale: bool = false,
     drain_deadline_usec: u64 = 0,
     bus: ?StringName = null,
     volume_db: f64 = 0,
@@ -109,6 +112,7 @@ pub const GeneratorOutput = struct {
         self.playback = null;
         self.generator = null;
         self.cursor = .{};
+        self.draining_stale = false;
         self.drain_deadline_usec = 0;
     }
 
@@ -165,7 +169,6 @@ pub const GeneratorOutput = struct {
         pb.setMeta(StringName.fromComptimeLatin1("_hap_generator_owner"), source_owner);
         self.playback = pb; // getStreamPlayback returns an owned engine Ref.
         self.capacity = pb.getFramesAvailable(); // FREE, not queued frames.
-        self.skips = pb.getSkips();
         self.cursor.reset(generation, position + outputLatency(), info.sample_rate);
         return true;
     }
@@ -189,8 +192,18 @@ pub const GeneratorOutput = struct {
             const queued: u64 = @intCast(@max(0, self.capacity - free));
             const head = self.cursor.next_frame -| queued;
             const tolerance = info.sample_rate / 20; // 50 ms + bounded device delay
-            const drifted = now > head + tolerance or head > now + tolerance;
-            if (self.cursor.generation != generation or drifted or pb.getSkips() != self.skips) self.stop();
+            // A skip is an underrun, not a controller discontinuity. Replacing
+            // the playback here overlaps Godot's deferred old-player fade with
+            // the new full-gain player. Recover using this same playback only.
+            if (now > head + tolerance or now > self.cursor.next_frame)
+                self.draining_stale = true;
+            if (self.draining_stale) {
+                // Never splice current PCM onto an old queued source range.
+                // The bounded ring must drain before rebasing the producer.
+                if (queued != 0) return;
+                self.cursor.next_frame = now;
+                self.draining_stale = false;
+            }
         }
         if (self.playback == null and !self.start(parent, info, generation, controller.position())) return;
         self.feed(scheduler, controller.position(), controller.duration(), info);
@@ -201,7 +214,11 @@ pub const GeneratorOutput = struct {
         if (self.staging == null) self.staging = .init();
         const buffer = &self.staging.?;
         for (0..batches_per_update) |_| {
-            const count = @min(self.cursor.count(position, duration, info.sample_rate), @as(usize, @intCast(@max(0, pb.getFramesAvailable()))));
+            // Unlike the stock adapter's Cursor.count, generator production
+            // must remain contiguous until reconcile observes an empty ring.
+            const end = frameAt(@min(duration, position + lead_seconds), info.sample_rate);
+            const pending: usize = @intCast(@min(end -| self.cursor.next_frame, batch_frames));
+            const count = @min(pending, @as(usize, @intCast(@max(0, pb.getFramesAvailable()))));
             if (count == 0) break;
             const read = scheduler.readAudio(self.cursor.next_frame, self.scratch[0 .. count * 2]);
             if (read == 0 or buffer.resize(@intCast(read)) != 0) break;

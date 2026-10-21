@@ -115,8 +115,31 @@ Godot's export mode:
 | Linux | x86_64, arm64 | `libhap_video.linux.{debug,release}.{x86_64,arm64}.so` |
 | Windows | x86_64, arm64 | `hap_video.windows.{debug,release}.{x86_64,arm64}.dll` |
 
-The release workflow builds those targets. The regular CI smoke test runs on
-macOS; the other release targets are cross-compiled in CI.
+CI and releases share `.github/workflows/build.yml`. All build jobs use
+Ubuntu 24.04 in one three-platform matrix (macOS, Linux, Windows). Zig 0.17.0
+cross-compiles all six architecture targets in both safe/debug and fast/release
+flavors: macOS arm64/x86_64, Linux x86_64/arm64 targeting glibc 2.31, and Windows
+x86_64/arm64. On the Linux host, `llvm-lipo-18` combines and verifies each macOS
+universal library. Builds do not install or run host Godot. The artifact names
+remain `hap-video-macos`, `hap-video-linux`, and `hap-video-windows`.
+
+Runtime CI runs only on Ubuntu 24.04, using Godot 4.7.2 and 4.6.3. Each run
+consumes the Linux x86_64 release library from `hap-video-linux`, without
+rebuilding the extension. Rendered Forward+ video and PCM smoke use Xvfb,
+Mesa software Vulkan, and PulseAudio with a virtual 48,000 Hz stereo sink.
+PCM validation requires the exact `AUDIO_SMOKE_DRIVER: PulseAudio` marker;
+Dummy audio and audio-driver fallback fail validation. Native core and Python
+helper tests run once, in the primary Godot 4.7.2 job. There are no native macOS
+or Windows runtime jobs: cross-compilation and Linux smoke do not prove that
+foreign-platform libraries load or run. Linux arm64 is compile-covered only.
+Sanitizer and benchmark workflows remain separate.
+
+The Release workflow supports `package-only` recovery: supply an existing
+`release-tag` to rebuild that tag and replace its ZIP, or leave the tag empty to
+upload a workflow artifact without creating a release. Build and packaging must
+use the same source ref, not the current branch tip. Packaging consumes the
+shared build artifacts and checks every library declared by the addon manifest,
+all required notices (including Snappy AUTHORS), and rejects stale extra files.
 
 ## Supported content
 
@@ -225,7 +248,7 @@ zig build test
 ```
 
 `build.zig.zon` fetches canonical upstream gdzig directly, pinned by URL to
-`7e50fe4eeed6b6d6437e61706f25906f8a68eac7` and verified by its Zig
+`c05f4910e2bf72cb947423acee6554dd0d29b041` and verified by its Zig
 package hash. The first build needs network access to fetch the dependency;
 subsequent builds use Zig's cache. This revision includes the nullable-object
 and nullable-Ref ptrcall fixes previously carried by our fork. Its bundled
@@ -245,7 +268,7 @@ GODOT_PATH=/path/to/godot zig build run
 
 If you use `gdvm`, point `GODOT_PATH` at the Godot executable it manages,
 for example `export GODOT_PATH="$(gdvm show 4.7.1)"`. The build does not
-pick a Godot version for you. CI still tests both 4.6.3 and 4.7.1.
+pick a Godot version for you. CI tests both 4.6.3 and 4.7.2.
 
 To regenerate the media fixtures from the project root, run
 `bash scripts/generate_fixtures.sh`. This requires Python 3 and FFmpeg built
@@ -292,6 +315,25 @@ dummy audio driver cannot validate these presentation/capture checks.
 On Godot 4.6, this upstream revision logs missing 4.7 interface probes (`variant_get_type_by_name`, `classdb_construct_object3`,
 `classdb_register_extension_class6`) at startup; the 4.6 fallback still runs
 and the smoke test passes.
+
+To test an already-built or downloaded extension without overwriting it:
+
+```bash
+python3 tests/run_smoke.py --godot gdvm --gdvm-version 4.7.2 \
+  --driver default --audio --log-dir ci-logs
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+The runner executes the two existing scenes serially, enforces deadlines and
+exact completion markers, and requires a Forward+ device banner. Its log checker
+allows only the scenes' exact intentional negative-test errors and the three
+known interface-probe errors on Godot 4.6; other errors and leaks fail even if
+Godot exits successfully. CI uploads build and runtime diagnostic logs. For
+video-only smoke omit `--audio`; PCM uses the normal engine cadence and a real
+audio driver, never a headless or Dummy-audio fallback.
+The optional `--audio-driver` selects a PCM driver and requires its exact marker
+in the log. Omit it for Godot's native default, including CoreAudio on macOS.
+CI passes `--audio-driver PulseAudio` and rejects fallback to another driver.
 
 ## Project layout
 

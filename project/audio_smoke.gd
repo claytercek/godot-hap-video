@@ -28,6 +28,11 @@ func _ready() -> void:
 
 
 func _verify() -> void:
+	var audio_driver := AudioServer.get_driver_name()
+	print("AUDIO_SMOKE_DRIVER: %s" % audio_driver)
+	if audio_driver == "Dummy":
+		_fail("PCM capture requires a real audio driver")
+		return
 	if not ClassDB.class_exists("HapPlayer"):
 		_fail("extension unavailable")
 		return
@@ -154,14 +159,14 @@ func _verify() -> void:
 	hap.loop = true
 	hap.stream_position = hap.duration - 0.1
 	hap.play()
-	await get_tree().create_timer(0.25).timeout
+	await _wait_audio_seconds(0.25)
 	if _looped == 0 or not await _audible("HapPlayer loop"):
 		_fail("HapPlayer did not loop")
 		return
 	hap.loop = false
 	hap.stream_position = hap.duration - 0.12
 	hap.play()
-	await get_tree().create_timer(0.35).timeout
+	await _wait_audio_seconds(0.35)
 	if _completed == 0:
 		_fail("HapPlayer did not complete")
 		return
@@ -196,7 +201,7 @@ func _verify() -> void:
 			active_playback_ref = weakref(child.get_stream_playback())
 	hap.queue_free()
 	await get_tree().process_frame
-	await get_tree().create_timer(0.15).timeout
+	await _wait_audio_seconds(0.15)
 	if generator_ref.get_ref() == null or generator_playback_ref.get_ref() == null:
 		_fail("retained old playback lost its generator when HapPlayer was freed")
 		return
@@ -204,7 +209,7 @@ func _verify() -> void:
 		_fail("active generator or get_stream_playback reference leaked during free")
 		return
 	retained_playback = null
-	await get_tree().create_timer(0.15).timeout
+	await _wait_audio_seconds(0.15)
 	if generator_ref.get_ref() != null or generator_playback_ref.get_ref() != null:
 		_fail("released old playback or its pinned generator leaked")
 		return
@@ -261,12 +266,12 @@ func _verify() -> void:
 		return
 	stock.loop = true
 	stock.stream_position = stock.get_stream_length() - 0.1
-	await get_tree().create_timer(0.25).timeout
+	await _wait_audio_seconds(0.25)
 	if not await _audible("VideoStreamPlayer loop"):
 		return
 	stock.loop = false
 	stock.stream_position = stock.get_stream_length() - 0.12
-	await get_tree().create_timer(0.35).timeout
+	await _wait_audio_seconds(0.35)
 	if stock.is_playing():
 		_fail("VideoStreamPlayer EOS drain did not finish")
 		return
@@ -316,7 +321,7 @@ func _verify_stereo(path: String) -> bool:
 	hap.pause()
 	if not await _wait_open(hap, path):
 		return false
-	await get_tree().create_timer(0.12).timeout
+	await _wait_audio_seconds(0.12)
 	var candidate_stats := _analyze(_capture.get_buffer(_capture.get_frames_available()))
 	if candidate_stats.peak > 0.0001:
 		_fail("unpublished candidate produced audio: %s" % candidate_stats)
@@ -339,8 +344,18 @@ func _verify_stereo(path: String) -> bool:
 	# inside it. The same strict backward-seek content assertions must still
 	# judge exactly 120 ms, rather than diluting them with the later dropout.
 	var read_delay_msec := 900 if path == STEREO_FIXTURES[0] else 0
+	var stalled_playback_id := 0
+	if read_delay_msec > 0:
+		stalled_playback_id = _generator_playback_id(hap)
 	if not await _pattern("HapPlayer %s backward seek" % path, false, read_delay_msec):
 		return false
+	if read_delay_msec > 0:
+		# process_frame precedes child processing; allow reconciliation to run.
+		await get_tree().process_frame
+		await get_tree().process_frame
+		if stalled_playback_id == 0 or _generator_playback_id(hap) != stalled_playback_id:
+			_fail("ordinary starvation recovery replaced the generator playback")
+			return false
 	hap.bus = SINK
 	if not await _silent("HapPlayer live bus routing"):
 		return false
@@ -407,6 +422,13 @@ func _verify_stereo(path: String) -> bool:
 	stream = null
 	await get_tree().process_frame
 	return await _silent("stereo VideoStreamPlayer freed")
+
+
+func _generator_playback_id(hap: Object) -> int:
+	for child in hap.get_children(true):
+		if child is AudioStreamPlayer and child.stream is AudioStreamGenerator and child.has_stream_playback():
+			return child.get_stream_playback().get_instance_id()
+	return 0
 
 
 func _verify_unsupported() -> bool:
@@ -512,7 +534,7 @@ func _verify_terminal_decode_failure() -> bool:
 	if not await _silent("terminal video failure silences PCM"):
 		return false
 	var stopped_position := stock.stream_position
-	await get_tree().create_timer(0.35).timeout
+	await _wait_audio_seconds(0.35)
 	if stock.is_playing() or absf(stock.stream_position - stopped_position) > 0.001:
 		_fail("terminal video decode failure automatically restarted the loop")
 		return false
@@ -626,6 +648,14 @@ func _wait_open(hap: Object, label: String) -> bool:
 	return true
 
 
+func _wait_audio_seconds(seconds: float) -> void:
+	# SceneTreeTimer subtracts the full frame delta, including time before its
+	# creation. Audio settling must instead elapse AFTER this wait starts.
+	var deadline := Time.get_ticks_usec() + ceili(seconds * 1000000.0)
+	while Time.get_ticks_usec() < deadline:
+		await get_tree().process_frame
+
+
 func _stats(read_delay_msec: int = 0) -> Dictionary:
 	_capture.clear_buffer()
 	var begin := Time.get_ticks_usec()
@@ -696,7 +726,7 @@ func _mono(label: String) -> bool:
 func _pattern(label: String, late: bool, read_delay_msec: int = 0) -> bool:
 	# Drain old server/device data before judging seek/loop content. Both
 	# channels retain tones, with dominance AND frequency changing at 1 second.
-	await get_tree().create_timer(0.15).timeout
+	await _wait_audio_seconds(0.15)
 	var stats := await _stats(read_delay_msec)
 	return _check_pattern(label, late, stats)
 
@@ -726,7 +756,7 @@ func _audible(label: String) -> bool:
 
 func _silent(label: String) -> bool:
 	# Discard bounded server/device tail before measuring a control transition.
-	await get_tree().create_timer(0.15).timeout
+	await _wait_audio_seconds(0.15)
 	var sample := await _sample()
 	if sample.y > 0.0001:
 		_fail("%s: stale audio RMS=%f" % [label, sample.y])
@@ -737,7 +767,7 @@ func _silent(label: String) -> bool:
 func _silent_immediate(label: String) -> bool:
 	# Caller clears before the transition. Do not discard its first audio:
 	# paused-before-play and stop/play regressions can leak only a short burst.
-	await get_tree().create_timer(0.12).timeout
+	await _wait_audio_seconds(0.12)
 	var stats := _analyze(_capture.get_buffer(_capture.get_frames_available()))
 	if stats.peak > 0.0001:
 		_fail("%s: unexpected immediate PCM: %s" % [label, stats])

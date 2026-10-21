@@ -15,67 +15,121 @@ on:
       - "README.md"
       - "build.zig"
       - "build.zig.zon"
-      - ".github/workflows/test.yml"
+      - ".github/workflows/**"
   pull_request:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  native-macos:
-    name: Build, test & smoke (macOS, Godot ${{ matrix.godot }})
-    runs-on: macos-latest
+  build:
+    uses: ./.github/workflows/build.yml
+
+  linux-smoke:
+    name: Linux tests & smoke (Godot ${{ matrix.godot }})
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
-        godot: [4.6.3, 4.7.1]
+        godot: ["4.7.2", "4.6.3"]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        if: matrix.godot == '4.7.2'
         with:
           version: 0.17.0
-
-      - name: Run core tests
-        run: zig build test --summary all
-
-      - name: Build extension
-        run: zig build --summary all
-
-      - name: Setup Godot
-        uses: chickensoft-games/setup-godot@v2
+      - uses: chickensoft-games/setup-godot@v2
         with:
           version: ${{ matrix.godot }}
           use-dotnet: false
-
-      - name: Godot extension smoke test
-        timeout-minutes: 2
-        run: zig build smoke --summary all
-
-  cross-compile:
-    name: Compile (${{ matrix.target }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - aarch64-macos
-          - x86_64-macos
-          - x86_64-linux-gnu.2.31
-          - aarch64-linux-gnu.2.31
-          - x86_64-windows-gnu
-          - aarch64-windows-gnu
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+      - uses: actions/setup-python@v5
         with:
-          version: 0.17.0
-
-      - name: Build shipped target
-        run: zig build -Dtarget=${{ matrix.target }} --summary all
+          python-version: "3.x"
+      - name: Record versions
+        run: |
+          mkdir -p ci-logs
+          {
+            if command -v zig >/dev/null 2>&1; then zig version; fi
+            godot --version
+            python --version
+          } 2>&1 | tee ci-logs/versions.log
+      - name: Test validation helpers
+        if: matrix.godot == '4.7.2'
+        run: python -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee ci-logs/helper-tests.log
+      - name: Install software Vulkan, Xvfb and PulseAudio
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth mesa-vulkan-drivers libvulkan1 pulseaudio pulseaudio-utils libpulse0
+      - uses: actions/download-artifact@v4
+        with:
+          name: hap-video-linux
+          path: staging
+      # zig build smoke would overwrite this artifact: invoke Godot directly.
+      - name: Install release extension
+        run: |
+          mkdir -p project/lib
+          cp staging/libhap_video.linux.release.x86_64.so project/lib/libhap_video.so
+      - name: Reject unresolved Linux symbols
+        run: |
+          ldd -r project/lib/libhap_video.so 2>&1 | tee ci-logs/ldd.log
+          if grep -E 'undefined symbol|not found' ci-logs/ldd.log; then exit 1; fi
+      - name: Rendered Vulkan and real PulseAudio PCM smoke
+        timeout-minutes: 5
+        run: |
+          export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json
+          export VK_ICD_FILENAMES="$VK_DRIVER_FILES" LIBGL_ALWAYS_SOFTWARE=1
+          test -f "$VK_DRIVER_FILES"
+          cat "$VK_DRIVER_FILES" | tee ci-logs/vulkan-icd.log
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/hap-video-runtime"
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          pulseaudio --version | tee -a ci-logs/versions.log
+          pactl --version | tee -a ci-logs/versions.log
+          # Keep diagnostics even when startup, setup or the smoke fails.
+          pulse_diagnostics() {
+            {
+              pactl info || true
+              pactl list sinks || true
+              pactl list sources || true
+              pactl list modules || true
+            } > ci-logs/pulse-state.log 2>&1
+          }
+          trap pulse_diagnostics EXIT
+          pulseaudio --start --exit-idle-time=-1 --log-target="file:$PWD/ci-logs/pulseaudio.log"
+          ready=false
+          for _ in {1..50}; do
+            if pactl info > ci-logs/pulse-readiness.log 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 0.1
+          done
+          if [[ "$ready" != true ]]; then
+            cat ci-logs/pulse-readiness.log
+            exit 1
+          fi
+          pactl load-module module-null-sink sink_name=hap_smoke rate=48000 channels=2 channel_map=front-left,front-right
+          pactl set-default-sink hap_smoke
+          pactl set-default-source hap_smoke.monitor
+          export PULSE_SINK=hap_smoke PULSE_SOURCE=hap_smoke.monitor
+          xvfb-run -a -e ci-logs/xvfb.log -s '-screen 0 640x480x24 -nolisten tcp' \
+            python tests/run_smoke.py --log-dir ci-logs --driver vulkan --audio --audio-driver PulseAudio -- --display-driver x11
+      # After smoke, once; core tests never install the extension.
+      - name: Run core tests
+        if: matrix.godot == '4.7.2'
+        timeout-minutes: 5
+        run: zig build test --summary all 2>&1 | tee ci-logs/native-tests.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-linux-godot-${{ matrix.godot }}
+          path: ci-logs/*.log
+          if-no-files-found: warn

@@ -1,0 +1,182 @@
+name: Release
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      package-only:
+        description: "Only build/package; skip release creation and release PR refresh"
+        type: boolean
+        required: false
+        default: false
+      release-tag:
+        description: "Existing release tag (package-only only; empty uploads a workflow artifact)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main' && !inputs.package-only
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      created: ${{ steps.release.outputs.created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Changie
+        uses: miniscruff/changie-action@v3
+        with:
+          version: v1.26.0
+
+      - name: Publish prepared release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(changie latest)"
+          # v0.3.0 contains imported history, not a new release.
+          if [[ "$tag" == v0.3.0 ]] || git show-ref --verify --quiet "refs/tags/$tag"; then
+            exit 0
+          fi
+          gh release create "$tag" --target "$GITHUB_SHA" \
+            --title "$tag" --notes-file ".changes/$tag.md"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$tag" >> "$GITHUB_OUTPUT"
+
+  # PR refresh must not block the binary build after publication succeeds.
+  release-pr:
+    if: github.ref == 'refs/heads/main' && !inputs.package-only
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Changie
+        uses: miniscruff/changie-action@v3
+        with:
+          version: v1.26.0
+
+      - name: Prepare release notes
+        id: notes
+        run: |
+          if compgen -G '.changes/unreleased/*.yaml' > /dev/null; then
+            changie batch auto --allow-no-changes=false
+          fi
+          changie merge
+          echo "version=$(changie latest)" >> "$GITHUB_OUTPUT"
+
+      # A fixed branch maintains one rolling PR, including when its proposed
+      # version changes. With no diff this also closes an obsolete release PR.
+      - name: Update release PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ github.token }}
+          base: main
+          branch: release/changie
+          delete-branch: true
+          title: Release ${{ steps.notes.outputs.version }}
+          commit-message: Release ${{ steps.notes.outputs.version }}
+          body-path: .changes/${{ steps.notes.outputs.version }}.md
+          add-paths: |
+            .changes/
+            CHANGELOG.md
+
+  # GITHUB_TOKEN-created releases do not trigger another release workflow.
+  # Build the published tag, or explicitly package a manual tag/SHA without
+  # creating a release. Ignore release-tag outside package-only mode.
+  build:
+    needs: release
+    if: always() && !cancelled() && (needs.release.outputs.created == 'true' || (github.event_name == 'workflow_dispatch' && inputs.package-only))
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ inputs.package-only && (inputs.release-tag || github.sha) || needs.release.outputs.tag_name }}
+    permissions:
+      contents: read
+
+  package:
+    name: Package & Publish
+    needs: [release, build]
+    if: always() && !cancelled() && needs.build.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.package-only && inputs.release-tag || needs.release.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.package-only && (inputs.release-tag || github.sha) || needs.release.outputs.tag_name }}
+          persist-credentials: false
+      # Recovery may target a tag predating the validation helper. Take the
+      # checker from the caller, while packaging all content from the tag above.
+      - name: Checkout packaging checker
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: ci-tools
+          sparse-checkout: tests/check_packaged_addon.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: hap-video-macos
+          path: staging
+      - uses: actions/download-artifact@v4
+        with:
+          name: hap-video-linux
+          path: staging
+      - uses: actions/download-artifact@v4
+        with:
+          name: hap-video-windows
+          path: staging
+      - name: Assemble addon
+        run: |
+          addon="addon-out/addons/hap_video"
+          mkdir -p "$addon/licenses"
+          cp staging/* "$addon/"
+          cp addon/hap_video.gdextension README.md LICENSE.md "$addon/"
+          cp thirdparty/licenses/* "$addon/licenses/"
+      - name: Verify addon completeness
+        run: python3 ci-tools/tests/check_packaged_addon.py addon-out/addons/hap_video
+      - name: Zip addon
+        run: |
+          zip_name="hap-video-${RELEASE_TAG:-${GITHUB_SHA}}.zip"
+          echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"
+          (cd addon-out && zip -r "../$zip_name" addons)
+      - name: Attach zip to GitHub Release
+        if: env.RELEASE_TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" "$ZIP_NAME" --clobber
+      - name: Upload workflow artifact (manual runs)
+        if: env.RELEASE_TAG == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: hap-video
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error

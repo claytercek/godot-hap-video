@@ -44,7 +44,7 @@ pub fn create(allocator: *Allocator) !*HapVideoStream {
     const self = try allocator.create(HapVideoStream);
     self.* = .{
         .allocator = allocator.*,
-        .base = if (godot.version.gte(.@"4.7")) VideoStream.init() else constructPendingBase(),
+        .base = if (godot.api_version.gte(.@"4.7")) VideoStream.init() else constructPendingBase(),
     };
     self.base.setInstance(HapVideoStream, self);
     return self;
@@ -54,7 +54,7 @@ pub fn create(allocator: *Allocator) !*HapVideoStream {
 /// owns the result directly rather than returning it through ClassDB `.new()`.
 pub fn createOwned(allocator: *Allocator) !*HapVideoStream {
     const self = try create(allocator);
-    if (!godot.version.gte(.@"4.7")) _ = self.base.initRef();
+    if (!godot.api_version.gte(.@"4.7")) _ = self.base.initRef();
     return self;
 }
 
