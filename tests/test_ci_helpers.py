@@ -83,6 +83,40 @@ class PulseConfigTests(unittest.TestCase):
         self.assertFalse(any(arg == "-F" or arg.startswith("--file") for arg in startup))
 
 
+class CaptureReadinessTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = (Path(__file__).resolve().parents[1] / "project/audio_smoke.gd").read_text()
+
+    def function(self, name):
+        return self.source.split(f"func {name}(", 1)[1].split("\n\nfunc ", 1)[0]
+
+    def test_readiness_precedes_candidate_and_discards_warmup(self):
+        verify = self.function("_verify")
+        install = verify.index("AudioServer.add_bus_effect(capture_bus, _capture)")
+        readiness = verify.index('if not await _wait_capture_window("capture readiness", 5000):')
+        candidate = verify.index('ClassDB.instantiate("HapVideoStream")')
+        self.assertLess(install, readiness)
+        self.assertLess(readiness, candidate)
+        self.assertIn("return\n\t_capture.clear_buffer()", verify[readiness:candidate])
+        self.assertLess(candidate, verify.index('await _silent("unplayed candidate")'))
+        self.assertLess(verify.index('await _silent("unplayed candidate")'), verify.index("hap.play()"))
+
+    def test_readiness_and_assertions_share_fresh_frame_wait_only(self):
+        wait = self.function("_wait_capture_window")
+        self.assertIn("timeout_msec: int = 1500", wait)
+        self.assertIn("_capture.clear_buffer()", wait)
+        self.assertIn("ceili(AudioServer.get_mix_rate() * CAPTURE_WINDOW_SECONDS)", wait)
+        self.assertIn("Time.get_ticks_msec() + timeout_msec", wait)
+        self.assertIn("while available < frames and Time.get_ticks_msec() < deadline:", wait)
+        self.assertIn("if available < frames:", wait)
+        self.assertIn("driver=%s mix_rate=%d", wait)
+        stats = self.function("_stats")
+        self.assertIn("await _wait_capture_window(label)", stats)
+        self.assertIn("_capture.get_buffer(frames)", stats)
+        self.assertIn("const CAPTURE_WINDOW_SECONDS := 0.12", self.source)
+
+
 class RunnerTests(unittest.TestCase):
     def test_fresh_project_extension_discovery(self):
         with tempfile.TemporaryDirectory() as tmp:

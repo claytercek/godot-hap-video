@@ -48,6 +48,13 @@ func _verify() -> void:
 	_capture.buffer_length = 1.0
 	AudioServer.add_bus_effect(capture_bus, _capture)
 
+	# Prove the backend is mixing a fresh window before creating any candidate.
+	# AudioEffectCapture processes silence even on a bus with no active source.
+	# Startup gets its own bound; playback assertions keep their 1500 ms limit.
+	if not await _wait_capture_window("capture readiness", 5000):
+		return
+	_capture.clear_buffer()
+
 	var stream: Object = ClassDB.instantiate("HapVideoStream")
 	stream.file = ProjectSettings.globalize_path(FIXTURE)
 	var hap: Object = ClassDB.instantiate("HapPlayer")
@@ -655,17 +662,15 @@ func _wait_audio_seconds(seconds: float) -> void:
 		await get_tree().process_frame
 
 
-func _stats(label: String, read_delay_msec: int = 0) -> Dictionary:
+func _wait_capture_window(label: String, timeout_msec: int = 1500) -> bool:
 	_capture.clear_buffer()
 	var begin := Time.get_ticks_usec()
 	var frames := ceili(AudioServer.get_mix_rate() * CAPTURE_WINDOW_SECONDS)
-	var deadline := Time.get_ticks_msec() + 1500
+	var deadline := Time.get_ticks_msec() + timeout_msec
 	var available := _capture.get_frames_available()
 	var first_progress_ms := -1.0
 	var last_progress := begin
-	# Read exactly the oldest 120 ms at the mix rate, independent of source rate.
-	# A SceneTree timer can resume late; reading the full queue could include a
-	# second of PCM plus starvation silence, skewing RMS and zero-crossing rates.
+	# Require a full fresh window, not just the backend's first mix callback.
 	while available < frames and Time.get_ticks_msec() < deadline:
 		await get_tree().process_frame
 		var current := _capture.get_frames_available()
@@ -677,7 +682,17 @@ func _stats(label: String, read_delay_msec: int = 0) -> Dictionary:
 	if available < frames:
 		var now := Time.get_ticks_usec()
 		_fail("%s: capture window timed out: need=%d available=%d elapsed_ms=%.1f first_progress_ms=%.1f stalled_ms=%.1f driver=%s mix_rate=%d" % [label, frames, available, (now - begin) / 1000.0, first_progress_ms, (now - last_progress) / 1000.0, AudioServer.get_driver_name(), AudioServer.get_mix_rate()])
+		return false
+	return true
+
+
+func _stats(label: String, read_delay_msec: int = 0) -> Dictionary:
+	# Read exactly the oldest 120 ms at the mix rate, independent of source rate.
+	# A SceneTree timer can resume late; reading the full queue could include a
+	# second of PCM plus starvation silence, skewing RMS and zero-crossing rates.
+	if not await _wait_capture_window(label):
 		return _analyze(PackedVector2Array())
+	var frames := ceili(AudioServer.get_mix_rate() * CAPTURE_WINDOW_SECONDS)
 	if read_delay_msec > 0:
 		OS.delay_msec(read_delay_msec)
 	var queued_frames := _capture.get_frames_available()
