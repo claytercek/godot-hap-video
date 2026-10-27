@@ -87,9 +87,8 @@ func _verify() -> void:
 		_fail("failed replacement did not preserve active playback")
 		return
 
-	# A nonempty malformed file is accepted by the synchronous setter and
-	# rejected later by the asynchronous mmap/demux job. The candidate must not
-	# replace the active pair until that work and GPU initialization succeed.
+	# The setter accepts a nonempty malformed file; async mmap/demux rejects it.
+	# Preserve the active pair until candidate opening and GPU initialization succeed.
 	var malformed_path := "user://hap_video_smoke_malformed.mov"
 	var malformed_file := FileAccess.open(malformed_path, FileAccess.WRITE)
 	if malformed_file == null:
@@ -109,8 +108,7 @@ func _verify() -> void:
 		return
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(malformed_path))
 
-	# Controls set while a valid replacement is still opening must belong to
-	# that candidate and survive its eventual promotion to the active pair.
+	# Preserve the opening replacement's controls when it becomes active.
 	var replacement_stream: Object = ClassDB.instantiate("HapVideoStream")
 	replacement_stream.file = "res://hap1.mov"
 	_opened = false

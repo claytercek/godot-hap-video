@@ -18,10 +18,9 @@ def prepare_extension_discovery(project):
     extension = project / "hap_video.gdextension"
     if not extension.is_file():
         raise FileNotFoundError(f"Project extension manifest not found: {extension}")
-    # Godot reads this newline-delimited resource list before loading scenes.
-    # A fresh artifact checkout has no editor-generated .godot cache, so the
-    # native classes would otherwise be unavailable. Use only this project's
-    # manifest: never discover or copy a native library from another install.
+    # Godot needs this newline-delimited list to register native classes before
+    # loading scenes; fresh artifact checkouts lack the editor's .godot cache.
+    # Use only this project's manifest, never libraries from another install.
     resource = "res://hap_video.gdextension"
     cache = project / ".godot" / "extension_list.cfg"
     existing = cache.read_text(encoding="utf-8") if cache.exists() else ""

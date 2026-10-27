@@ -1,4 +1,4 @@
-//! Public-seam tests for PlaybackController.
+//! Test PlaybackController through its public API.
 
 const std = @import("std");
 const testing = std.testing;

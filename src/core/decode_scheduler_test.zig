@@ -1,12 +1,7 @@
-//! decode_scheduler_test.zig — dedicated test suite for DecodeScheduler.
-//!
-//! DecodeScheduler tests: async open, continuous serial prefetch fill,
-//! and seek/queue-behind semantics, against real fixture files. Headless,
-//! no GPU.
-//!
-//! Fixture paths are relative to the repo root, which is the test working
-//! directory (matches demuxer.zig/mmap_reader.zig/decoder_test.zig's
-//! fixture tests); a missing fixture skips the case.
+//! Headless DecodeScheduler tests for async open, serial prefetch, and
+//! seek/queue-behind behavior with real fixtures. No GPU. Fixture paths
+//! are relative to the repo root (the test working directory); missing
+//! fixtures skip the case.
 
 const std = @import("std");
 const testing = std.testing;
@@ -19,9 +14,7 @@ const DecodeScheduler = decode_scheduler.DecodeScheduler;
 
 const fixture_hap1 = "tests/fixtures/hap1.mov";
 
-/// Bound for the waitFor/drain polls throughout this file: how long a
-/// scheduler operation (open, prefetch, seek) gets to complete before a
-/// test gives up and fails.
+/// Timeout for waitFor/drain polls of open, prefetch, and seek operations.
 const wait_timeout_ms: i64 = 5000;
 /// Bound for the holdsFor check that reverse playback does not emit a
 /// frame past index 0 once it has settled there.
@@ -295,13 +288,10 @@ test "scheduler rapid seeks resolve to latest target only" {
 
     try testing.expect(scheduler.requestFrame(0, true));
 
-    // Let one frame land and consume it so a decode is plausibly in
-    // flight, then fire a burst of seeks back-to-back with no waiting in
-    // between -- only the last one should ever be honored (latest seek
-    // wins). The discarded targets are chosen far from both the initial
-    // in-flight window and the final target so any of them showing up in
-    // the queue is unambiguously a scheduling bug, not a coincidence of
-    // sequential decode.
+    // Consume a frame to allow an in-flight decode, then request seeks
+    // without waiting. Only the last target should apply. Discarded targets
+    // are far from the initial decode window and final target, so normal
+    // sequential decode cannot produce them.
     try testing.expect(test_support.waitFor(HasFramePred, .{ .scheduler = &scheduler }, HasFramePred.hasFrame, wait_timeout_ms));
     var first_lease = scheduler.queue.acquireRead().?;
     defer if (first_lease.active) first_lease.release();
@@ -433,11 +423,8 @@ test "scheduler reverse playback stops cleanly at frame zero" {
     }
     try testing.expect(saw_zero);
 
-    // Give the scheduler a bounded window to (mis)behave: it must not
-    // produce another frame after 0 (no wraparound, no duplicate spam).
-    // Poll throughout the window rather than sleeping once and sampling
-    // at the end, so a spurious frame that appears and is then popped
-    // mid-sleep isn't missed.
+    // Poll throughout the window to catch any frame after 0, including a
+    // transient frame that a single post-sleep check could miss.
     const NoFramePred = struct {
         scheduler: *DecodeScheduler,
         fn f(self: @This()) bool {
@@ -515,12 +502,9 @@ test "scheduler concurrent seeks never tear target and direction" {
     const frame_count = scheduler.trackInfo().frame_count;
     if (frame_count < 12) return error.SkipZigTest;
 
-    // Two coherent (target, direction) pairs. requestFrame writes target,
-    // direction, and the pending flag in one critical section, so a torn
-    // application -- one call's target paired with the other's direction,
-    // e.g. (5, backward) or (10, forward) -- must be impossible. Two
-    // threads hammer the two pairs with no spacing to maximize
-    // interleaving.
+    // Race two (target, direction) pairs without pauses. requestFrame must
+    // publish each pair and its pending flag in one critical section;
+    // mixed pairs such as (5, backward) or (10, forward) must never appear.
     const target_a: u32 = 5; // forward  -> queue fills 5, 6, 7, ...
     const target_b: u32 = 10; // backward -> queue fills 10, 9, 8, ...
 

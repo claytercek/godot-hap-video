@@ -1,9 +1,8 @@
-//! Main-thread PCM output. The MOV controller remains the clock; Godot only
-//! consumes bounded, copied stereo buffers. No extension callback runs on the
-//! audio thread. This is pragmatic A/V sync (roughly 100 ms on normal devices),
-//! not a hardware-clock or gapless-playback guarantee. Long stalls drop stale
-//! sound rather than replaying it late; unusually large device latency cannot
-//! be hidden by a small application buffer.
+//! Main-thread PCM output clocked by the MOV controller. Godot consumes
+//! bounded copies of stereo PCM; this output runs no extension callbacks on
+//! the audio thread. Expected A/V sync is roughly 100 ms on normal devices,
+//! without hardware-clock or gapless guarantees. Long stalls drop stale PCM.
+//! The small application buffer cannot hide unusually large device latency.
 const std = @import("std");
 const godot = @import("godot");
 const core = @import("core");
@@ -30,16 +29,15 @@ pub fn frameAt(seconds: f64, rate: u32) u64 {
     return @intFromFloat(@max(0.0, seconds) * @as(f64, @floatFromInt(rate)));
 }
 
-/// Device/mixer delay is only a bounded startup compensation, never a second
-/// clock. Keep this out of the stock path: its resampler owns speed scaling.
+/// Bound startup compensation for device/mixer delay; the controller stays
+/// the clock. Exclude the stock path, whose resampler handles speed scaling.
 fn outputLatency() f64 {
     return std.math.clamp(godot.class.AudioServer.getOutputLatency() +
         godot.class.AudioServer.getTimeToNextMix(), 0.0, 0.03);
 }
 
-/// Cursor advances ONLY by frames accepted by the sink. A partial stock mix
-/// can reread the remaining immutable PCM on the next update without losing it
-/// or allocating another pending-buffer queue.
+/// Advance only by accepted frames. After a partial stock mix, reread the
+/// remaining immutable PCM next update without a pending-buffer queue.
 pub const Cursor = struct {
     generation: ?u64 = null,
     next_frame: u64 = 0,
@@ -57,9 +55,9 @@ pub const Cursor = struct {
     }
 };
 
-/// A private AudioStreamPlayer child, addressed by ObjectID because children
-/// can already have been deleted when HapPlayer's extension destructor runs.
-/// Generator/playback references, unlike the child, are explicitly ours.
+/// Private AudioStreamPlayer child tracked by ObjectID: Godot may delete it
+/// before HapPlayer's extension destructor runs. Own the generator/playback
+/// references explicitly.
 pub const GeneratorOutput = struct {
     child_id: u64 = 0,
     generator: ?*AudioStreamGenerator = null,
@@ -96,14 +94,13 @@ pub const GeneratorOutput = struct {
     }
 
     pub fn stop(self: *GeneratorOutput) void {
-        // stop is deferred on the server. NEVER clearBuffer() on the old
-        // playback, even after setting stream_paused: it may still be active.
+        // Server stop is deferred. Never clearBuffer() on old playback:
+        // it may remain active even after stream_paused is set.
         if (self.playback != null or self.generator != null) {
             if (self.child()) |player| {
                 player.stop();
-                // The generated typed setter takes a non-null pointer even
-                // though Godot permits null. Clear via the Object property so
-                // an idle child does not retain the old generator indefinitely.
+                // The typed setter forbids null. Clear the Object property
+                // so the idle child releases its old generator.
                 player.set(StringName.fromComptimeLatin1("stream"), .nil);
             }
         }
@@ -130,9 +127,8 @@ pub const GeneratorOutput = struct {
         const player = self.child() orelse blk: {
             const player = AudioStreamPlayer.init();
             self.child_id = player.getInstanceId();
-            // Parent notifications handle eligibility. Making this internal
-            // child ALWAYS prevents its unpause notification from overriding
-            // the parent's explicit pause policy.
+            // Parent notifications control eligibility. ALWAYS keeps the
+            // child's unpause notification from overriding parent policy.
             player.setProcessMode(.process_mode_always);
             parent.addChild(.upcast(player), .{ .internal = .internal_mode_back });
             break :blk player;
@@ -159,11 +155,11 @@ pub const GeneratorOutput = struct {
             player.stop();
             return false;
         };
-        // Godot's generator playback keeps only a RAW generator pointer.
-        // AudioServer retains the playback for its deferred stop/fade, after
-        // the child and our own generator reference may already be gone.
-        // Tie the source lifetime to that playback (no cycle: the generator
-        // does not own its playback), including externally retained playbacks.
+        // Playback holds a raw generator pointer. AudioServer may retain
+        // playback for deferred stop/fade after the child and this output
+        // release the generator. Retain the source in playback metadata,
+        // including for external playback owners. This creates no cycle:
+        // the generator does not own playback.
         const source_owner = godot.builtin.Variant.init(*AudioStreamGenerator, stream);
         defer source_owner.deinit();
         pb.setMeta(StringName.fromComptimeLatin1("_hap_generator_owner"), source_owner);
@@ -192,9 +188,8 @@ pub const GeneratorOutput = struct {
             const queued: u64 = @intCast(@max(0, self.capacity - free));
             const head = self.cursor.next_frame -| queued;
             const tolerance = info.sample_rate / 20; // 50 ms + bounded device delay
-            // A skip is an underrun, not a controller discontinuity. Replacing
-            // the playback here overlaps Godot's deferred old-player fade with
-            // the new full-gain player. Recover using this same playback only.
+            // Recover underruns with the same playback. Replacing it would
+            // overlap the old player's deferred fade with a full-gain player.
             if (now > head + tolerance or now > self.cursor.next_frame)
                 self.draining_stale = true;
             if (self.draining_stale) {
@@ -226,8 +221,8 @@ pub const GeneratorOutput = struct {
             // pinned version. The packed array storage is Vector2-aligned.
             const frames: [*]godot.builtin.Vector2 = @ptrCast(@alignCast(godot.raw.packedVector2ArrayOperatorIndex(buffer.ptr(), 0).?));
             for (frames[0..read], 0..) |*frame, i| frame.* = .{ .x = self.scratch[i * 2], .y = self.scratch[i * 2 + 1] };
-            // pushBuffer is all-or-nothing. Re-read the SAME cursor next time
-            // on rejection; never interpret its bool as a frame count.
+            // pushBuffer accepts all or none. On rejection, retry the same
+            // cursor; its bool result is not a frame count.
             if (!pb.pushBuffer(buffer.*)) break;
             self.cursor.next_frame += read;
         }

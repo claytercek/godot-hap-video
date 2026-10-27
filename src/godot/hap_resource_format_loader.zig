@@ -1,9 +1,5 @@
-//! hap_resource_format_loader.zig — .mov ResourceFormatLoader.
-//!
-//! Registered with ResourceLoader (see extension.zig's LoaderLifecycle) for
-//! the ".mov" extension. Does not decode anything here -- it just produces a
-//! HapVideoStream resource pointing at the file; decoding happens lazily in
-//! the playback.
+//! .mov ResourceFormatLoader installed by extension.zig's LoaderLifecycle.
+//! Creates a HapVideoStream with the file path; playback decodes it lazily.
 
 const HapResourceFormatLoader = @This();
 
@@ -25,12 +21,9 @@ const ref = @import("ref.zig");
 const log = std.log.scoped(.hap_resource_format_loader);
 
 pub fn register(r: *Registry) void {
-    // Abstract (non-instantiable from GDScript): the loader is a singleton
-    // created once, internally, by extension.zig's LoaderLifecycle (via
-    // create() directly). Marking it abstract removes the ClassDB `.new()`
-    // path -- which would otherwise double-claim the RefCounted base, since
-    // create()'s `.init()` legitimately claims the single reference the
-    // LoaderLifecycle owns and releases at teardown (see create()).
+    // Keep the singleton abstract so ClassDB .new() cannot double-claim
+    // its initial RefCounted reference. LoaderLifecycle calls create(),
+    // owns that reference, and releases it at teardown.
     r.addClass(HapResourceFormatLoader, r.allocator, .{ .is_abstract = true });
 }
 
@@ -45,9 +38,8 @@ pub fn create(allocator: *Allocator) !*HapResourceFormatLoader {
     const self = try allocator.create(HapResourceFormatLoader);
     self.* = .{
         .allocator = allocator.*,
-        // Claims RefCounted's initial reference: this is the sole,
-        // internal creation path (the class is abstract, so there is no
-        // GDScript `.new()` to also claim it -- see register()).
+        // Claim the initial reference on the sole creation path; the
+        // abstract class prevents a second claim through GDScript .new().
         .base = .init(),
     };
     self.base.setInstance(HapResourceFormatLoader, self);
@@ -103,12 +95,9 @@ pub fn _load(
     const stream = HapVideoStream.createOwned(&self.allocator) catch return Variant.nil;
     stream.setFile(p_path);
 
-    // Variant.init() takes its own +1 reference on RefCounted objects; the
-    // createOwned() call above already gave us a sole owning reference. Release
-    // our copy once the Variant holds its own, so exactly one reference
-    // survives. This should never be the last reference (see ref.zig), but
-    // goes through the same typed-destroy path regardless in case
-    // Variant.init() ever fails to take its own.
+    // Variant.init() takes a +1 reference. Release the createOwned() ref
+    // so only the Variant's remains. Use typed destroy (see ref.zig) even
+    // if Variant.init() unexpectedly leaves this as the last reference.
     const result = Variant.init(*HapVideoStream, stream);
     ref.releaseAndDestroy(HapVideoStream, stream, &self.allocator);
     return result;

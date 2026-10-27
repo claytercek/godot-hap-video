@@ -1,14 +1,10 @@
-//! hap_player.zig — the HapPlayer Control node.
+//! HapPlayer Control node. Owns the Godot-free PlaybackController and
+//! drives the HapVideoStreamPlayback adapter.
 //!
-//! Power-user layer: a Control node that owns the authoritative Godot-free
-//! PlaybackController and drives a thin HapVideoStreamPlayback adapter.
-//!
-//! The GDScript surface (methods/properties/signals) is exercised
-//! end-to-end by project/demo/hap_player_demo.gd: stream, loop, autoplay, opened,
-//! playback_completed, error_occurred, frame_count, stream_position,
-//! frame_rate, playback_speed, paused, get_texture(), play(), pause(),
-//! step_frame(n).
-//!
+//! project/demo/hap_player_demo.gd exercises the GDScript API: stream, loop,
+//! autoplay, opened, playback_completed, error_occurred, frame_count,
+//! stream_position, frame_rate, playback_speed, paused, get_texture(),
+//! play(), pause(), step_frame(n).
 const HapPlayer = @This();
 
 const std = @import("std");
@@ -23,8 +19,7 @@ const StringName = godot.builtin.StringName;
 const Node = godot.class.Node;
 const PropertyUsageFlags = godot.global.PropertyUsageFlags;
 
-// Core types come through the "core" named module (build.zig-wired) so they
-// match the module instance the rest of the extension hands around.
+// Share build.zig's core module instance with the rest of the extension.
 const core = @import("core");
 const PlaybackController = core.playback_controller.PlaybackController;
 
@@ -35,9 +30,7 @@ const audio_output = @import("audio_output.zig");
 
 const log = std.log.scoped(.hap_player);
 
-/// Usage for the read-only metadata properties below (frame_rate, width,
-/// height, duration, frame_count). Read-only: storage and editor visibility
-/// both off.
+/// Read-only metadata: omit storage and editor visibility.
 const read_only_usage: PropertyUsageFlags = .{
     .property_usage_storage = false,
     .property_usage_editor = false,
@@ -58,10 +51,8 @@ pub fn register(r: *Registry) void {
         .hint_string = String.fromLatin1("HapVideoStream"),
     });
 
-    // "loop"/"paused"/"autoplay" use is_x()/set_x() naming (Godot's bool
-    // convention), which gdzig's property auto-detect (getX/setX only)
-    // can't find on its own -- register the methods explicitly and wire
-    // them to the property by pointer.
+    // Register bool accessors explicitly: Godot uses is_x()/set_x(), but
+    // gdzig only auto-detects getX/setX. Bind each property by method pointer.
     const is_loop = class.createMethod("is_loop", .auto);
     const set_loop = class.createMethod("set_loop", .auto);
     class.addProperty("loop", .{ .getter = .{ .method = is_loop }, .setter = .{ .method = set_loop } });
@@ -112,9 +103,8 @@ stream: ?*HapVideoStream = null,
 playback: ?*HapVideoStreamPlayback = null,
 controller: PlaybackController = .init(),
 
-// A replacement remains private until its asynchronous open and GPU setup
-// both succeed. It uses a separate controller so candidate initialization
-// cannot reconfigure the still-active playback's clock.
+// Publish a replacement only after async open and GPU setup succeed.
+// Its separate controller keeps setup from changing the active clock.
 pending_stream: ?*HapVideoStream = null,
 pending_playback: ?*HapVideoStreamPlayback = null,
 pending_controller: PlaybackController = .init(),
@@ -143,9 +133,8 @@ pub fn destroy(self: *HapPlayer, allocator: *Allocator) void {
 }
 
 pub fn setStream(self: *HapPlayer, new_stream: ?*HapVideoStream) void {
-    // A property get/set round trip can pass our own stored resource back to
-    // us. Keep the active adapter intact rather than releasing the only
-    // persistent reference before we retain the replacement.
+    // A get/set round trip may return the stored resource. Keep its adapter
+    // and owning reference intact when the resource is unchanged.
     if (new_stream != null and self.pending_stream == new_stream) return;
     if (self.stream == new_stream) {
         self.clearPendingStream();
@@ -158,18 +147,15 @@ pub fn setStream(self: *HapPlayer, new_stream: ?*HapVideoStream) void {
         return;
     };
 
-    // There can be only one unpublished candidate. Cancelling an older open
-    // may wait for its already-running stream job, but never disturbs the
-    // active playback pair.
+    // Keep one pending candidate. Cancellation may wait for its running
+    // stream job; the active playback pair stays unchanged.
     self.clearPendingStream();
 
     self.pending_controller = self.controller;
     self.pending_controller.resetStream();
 
-    // Take our own persistent share: `new_stream` is a borrowed pointer
-    // for the duration of this setter call only (matches every other
-    // Object-typed method argument here), but we're storing it beyond
-    // that, so we need an independent owning reference.
+    // Object arguments are borrowed for the call. Retain an independent
+    // reference because pending_stream outlives this setter.
     _ = stream.base.reference();
 
     const pb = HapVideoStreamPlayback.createBorrowed(&self.allocator, &self.pending_controller) catch {
@@ -229,10 +215,9 @@ pub fn getStream(self: *HapPlayer) ?*HapVideoStream {
     return self.pending_stream orelse self.stream;
 }
 
-/// Public controls target the selected replacement while it is opening. The
-/// old playback remains a visual placeholder and keeps its existing state;
-/// if the candidate succeeds these pre-open controls are promoted with it,
-/// and if it fails the untouched active state becomes authoritative again.
+/// Route controls to the opening replacement while preserving active state
+/// and texture. Promote those controls on success; keep the active controller
+/// authoritative on failure.
 fn selectedController(self: *HapPlayer) *PlaybackController {
     return if (self.pending_stream != null) &self.pending_controller else &self.controller;
 }
@@ -295,16 +280,14 @@ pub fn setPaused(self: *HapPlayer, value: bool) void {
     self.reconcileAudio();
 }
 
-/// Start (or resume) playback from the current stream_position, in the
-/// direction implied by playback_speed's sign. Does not reset position --
-/// resuming after pause/completion continues from where playback left off.
+/// Start or resume at stream_position, including after pause/completion.
+/// playback_speed's sign sets the direction; position stays unchanged.
 pub fn play(self: *HapPlayer) void {
     self.selectedController().play();
     self.reconcileAudio();
 }
 
-/// Freeze the pump in place; texture and stream_position are retained.
-/// Equivalent to set_paused(true).
+/// Pause without changing the texture or stream_position. Same as set_paused(true).
 pub fn pause(self: *HapPlayer) void {
     self.selectedController().pause();
     self.reconcileAudio();
@@ -319,9 +302,8 @@ pub fn stop(self: *HapPlayer) void {
     self.reconcileAudio();
 }
 
-/// Pause-gated: auto-pauses if playing, then moves exactly n frames (n may
-/// be negative) via a priority seek. `n` is `i64`: gdzig bound-method
-/// marshalling supports only i64 integers; GDScript int is 64-bit anyway.
+/// Auto-pause, then priority-seek by n frames; negative n steps backward.
+/// Use i64 because gdzig bound methods require it and GDScript int is 64-bit.
 pub fn stepFrame(self: *HapPlayer, n: i64) void {
     const pb = self.selectedPlayback() orelse return;
     if (!pb.isReady()) return;
@@ -400,9 +382,8 @@ pub fn _process(self: *HapPlayer, delta: f64) void {
     const now_ready = pb.pollReady();
 
     if (now_ready and !was_ready) {
-        // Materialize the current (possibly pre-set) position's frame
-        // immediately, so getTexture() is valid the instant `opened` fires
-        // -- before any handler calls play().
+        // Request the current (possibly pre-set) frame before opened
+        // handlers can query getTexture() or call play().
         pb.advance(self.controller.frameRequest(true));
 
         self.base.emit(Opened, .{}) catch {};
@@ -430,9 +411,8 @@ pub fn _process(self: *HapPlayer, delta: f64) void {
     if (step.completed) self.base.emit(PlaybackCompleted, .{}) catch {};
 }
 
-/// Advance an unpublished replacement through async open and GPU setup. A
-/// failure releases only the candidate; success swaps the complete pair and
-/// rebinds its controller to the player's stable active-controller address.
+/// Poll pending open and GPU setup. Release only the candidate on failure.
+/// On success, swap the pair and rebind to the stable active-controller address.
 fn pollPendingStream(self: *HapPlayer) void {
     const pb = self.pending_playback orelse return;
 

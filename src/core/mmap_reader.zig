@@ -1,16 +1,10 @@
-//! mmap_reader.zig
+//! Read-only file mapping. `init` opens and maps the file; an empty file
+//! succeeds with an empty `data` slice. Missing/unreadable files and failed
+//! fstat/mmap calls return Zig errors.
 //!
-//! Read-only memory-mapped file view. `init` opens and maps the file;
-//! `deinit` unmaps it. An empty file is a valid, successful open whose
-//! `data` is an empty slice; a missing/unreadable file, a failed `fstat`,
-//! or a failed `mmap` are all reported as errors.
-//!
-//! Design notes:
-//!   * Failures are reported via a Zig error union.
-//!   * `path` is stored as a borrowed slice: the caller must keep the string
-//!     backing it alive for the reader's lifetime.
-//!   * `MmapReader` is a plain struct; call `deinit` yourself when replacing
-//!     or dropping one, since Zig has no destructors.
+//! Keep the borrowed `path` string alive for the reader's lifetime. Call
+//! `deinit` to unmap before replacing or dropping a reader; Zig has no
+//! destructors.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -83,21 +77,14 @@ pub const MmapReader = struct {
         return .{ .data = mapped, .path = path };
     }
 
-    /// Size in bytes of an already-open file descriptor, cross-platform.
+    /// Return an open file descriptor's size in bytes across platforms.
     ///
-    /// zig 0.16's `std.c` deliberately stubs `fstat`/`fstatat` out to `void`
-    /// on Linux (see std/c.zig: `.linux => {}`) rather than exposing glibc's
-    /// versioned fstat symbols, so the `std.c.fstat` call this used on macOS
-    /// doesn't exist as a callable decl there. The blessed 0.16 replacement
-    /// is `std.Io.File.stat`, but that requires an `Io` instance, and the
-    /// only zero-setup one std ships (`std.Io.Threaded.global_single_threaded`)
-    /// is documented as not supporting concurrency -- this codebase already
-    /// hit a real bug from using it on a path that runs on real concurrent
-    /// OS threads (see sync.zig's module doc), and `MmapReader.init` is
-    /// called from decode_scheduler.zig, which is exactly such a path. So
-    /// Linux goes through a direct, dependency-free `statx(2)` syscall via
-    /// `std.os.linux.statx` instead (fd-only, `AT.EMPTY_PATH`, `STATX.SIZE`),
-    /// which needs neither libc nor the Io framework.
+    /// Zig 0.16 stubs std.c.fstat/fstatat to void on Linux instead of exposing
+    /// glibc's versioned symbols. std.Io.File.stat requires Io, and
+    /// std.Io.Threaded.global_single_threaded does not support the concurrent
+    /// scheduler threads that call init (see sync.zig). Use std.os.linux.statx
+    /// with AT.EMPTY_PATH and STATX.SIZE for an fd-only query without libc
+    /// or Io.
     fn fstatSize(fd: posix.fd_t) !u64 {
         if (builtin.os.tag == .linux) {
             const linux = std.os.linux;
@@ -159,10 +146,9 @@ pub const MmapReader = struct {
 
 // -- Windows-only extern bindings ------------------------------------------
 //
-// std.os.windows no longer wraps these Win32 file-API calls or exposes
-// their flat constants (zig 0.16 keeps only typed wrappers like
-// ACCESS_MASK), so both are declared directly here. Pruned at comptime on
-// non-Windows targets; exercised by the cross-compiled Windows builds.
+// Zig 0.16 exposes typed wrappers such as ACCESS_MASK but omits these Win32
+// file calls and flat constants. Declare them here; non-Windows targets
+// prune them at comptime. Cross-compiled Windows builds check the bindings.
 
 const GENERIC_READ: u32 = 0x8000_0000;
 const FILE_SHARE_READ: u32 = 0x01;

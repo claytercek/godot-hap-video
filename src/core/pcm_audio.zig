@@ -1,6 +1,6 @@
-//! Bounded, Godot-free PCM reads from an already mapped MOV. The open worker
-//! builds an immutable O(chunks + table runs) index; read() neither allocates
-//! nor calls minimp4. It is intended for bounded main-thread batches, NOT a
+//! Read PCM from a mapped MOV without Godot. The open worker builds an
+//! immutable O(chunks + table runs) index. read() allocates nothing and
+//! never calls minimp4; use it for bounded main-thread batches, never a
 //! real-time audio callback. The mmap must outlive Source.
 const std = @import("std");
 

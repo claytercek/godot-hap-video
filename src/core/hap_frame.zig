@@ -1,8 +1,5 @@
-//! hap_frame.zig
-//!
-//! Pure data types shared by the demuxer/decoder: texture format tags,
-//! decoded-frame containers, FourCC handling and video-track metadata.
-//! No behavior beyond a couple of small helpers.
+//! Shared demuxer/decoder data types and small helpers for texture formats,
+//! decoded frames, FourCCs, and video-track metadata.
 
 const std = @import("std");
 
@@ -80,12 +77,10 @@ pub const fcc_hap7 = FourCC.initChars('H', 'a', 'p', '7'); // Hap R (BC7/BPTC)
 pub const fcc_hapa = FourCC.initChars('H', 'a', 'p', 'A'); // HapA (alpha-only, unsupported)
 pub const fcc_haphdr = FourCC.initChars('H', 'a', 'p', 'H'); // Hap HDR (BC6, unsupported)
 
-/// Single source of truth for every supported Hap variant used by the
-/// decoder and presenter. Known-but-unsupported FourCCs intentionally have
-/// no enum tag, so they cannot cross the demux boundary as an operational
-/// format. Adding or retiring a supported Hap variant should only ever
-/// require editing this enum plus the corresponding godot-format switch in
-/// gpu_presenter.zig.
+/// Supported Hap variants shared by the decoder and presenter. Unsupported
+/// FourCCs have no tag, so they cannot cross the demux boundary as usable
+/// formats. Add or retire variants here and in gpu_presenter.zig's matching
+/// Godot-format switch.
 pub const HapVariant = enum {
     hap1, // Hap (BC1/DXT1)
     hap5, // Hap Alpha (BC3/DXT5)

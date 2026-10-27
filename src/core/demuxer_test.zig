@@ -1,11 +1,5 @@
-//! demuxer_test.zig — dedicated test suite for Demuxer.
-//!
-//! Split out of demuxer.zig per the project convention for large suites
-//! (see decoder.zig/decoder_test.zig and how core.zig wires the sibling
-//! test files into its test block).
-//!
-//! Fixture paths are relative to the repo root, which is the test working
-//! directory (matches mmap_reader.zig's fixture tests).
+//! Demuxer tests, imported by core.zig. Fixture paths are relative to the
+//! repo root, the test working directory.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -190,17 +184,12 @@ test "validateSamples handles offset and size summing past 4 GB" {
 }
 
 // -----------------------------------------------------------------------
-// Demuxer tests with fixture files.
-//
-// Paths are relative to the repo root, which is the test working directory
-// (matches mmap_reader.zig's fixture tests).
+// Demuxer tests with repo-root-relative fixture paths.
 // -----------------------------------------------------------------------
 
-/// Shared helper: open `path` via test_support.openFixture (which skips on a
-/// missing fixture) and assert the fourcc/width/height/frame_count fields
-/// common to all four fixture-open tests below. `extra`, if non-null, runs
-/// while the demuxer is still open, for assertions specific to one test
-/// (e.g. frame_rate).
+/// Open `path` with test_support.openFixture, skipping missing fixtures.
+/// Check fourcc, dimensions, and frame_count. Run any `extra` assertions
+/// (e.g. frame_rate) before closing the demuxer.
 fn expectFixtureOpensAs(
     path: []const u8,
     expected_fourcc: FourCC,
@@ -242,16 +231,13 @@ test "open skips an audio track and finds the Hap1 video track" {
 // -----------------------------------------------------------------------
 // >4 GB file support.
 //
-// Regression coverage for vendored minimp4's MP4D_64BIT_SUPPORTED /
-// MINIMP4_ALLOW_64BIT macro mixup (see thirdparty/README.md), which rejected
-// any 64-bit box size or co64 chunk offset with a nonzero high word --
-// i.e. every Hap file larger than 4 GB.
+// Guard against minimp4's MP4D_64BIT_SUPPORTED / MINIMP4_ALLOW_64BIT macro
+// mixup (see thirdparty/README.md). It rejected 64-bit box sizes and co64
+// offsets with a nonzero high word, including Hap files larger than 4 GB.
 //
-// No multi-gigabyte fixture is committed; the test synthesizes one from
-// hap1.mov by widening its mdat into a 64-bit box padded with a 4 GiB
-// leading hole and rewriting the moov's stco as co64. The file is written
-// sparsely (two positional writes around the hole), so it occupies under
-// a megabyte of real disk on filesystems with sparse-file support.
+// Synthesize a large file from hap1.mov: widen mdat to a 64-bit box with a
+// leading 4 GiB hole and rewrite moov's stco as co64. Two positional writes
+// keep disk use under a megabyte on filesystems that support sparse files.
 // -----------------------------------------------------------------------
 
 /// A raw box located in fixture bytes: absolute offset and declared size.

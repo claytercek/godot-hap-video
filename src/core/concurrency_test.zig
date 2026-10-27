@@ -1,15 +1,9 @@
-//! concurrency_test.zig — dedicated test suite for the concurrency
-//! primitives.
+//! Headless tests for the SPSC frame queue, per-stream outer-pool
+//! serialization, retire ring sequencing, and thread-count bounds. No GPU.
 //!
-//! Concurrency unit tests: SPSC frame queue contract, outer-pool
-//! per-stream serial invariant, retire ring sequencing, and thread-count
-//! bounds. Headless, no GPU.
-//!
-//! Note: an invariant violated from inside a spawned worker thread is
-//! checked with `std.debug.assert` rather than surfaced back to the
-//! spawning test function -- Zig's std.Thread has no built-in
-//! cross-thread error propagation, so a violation aborts the process
-//! instead, which fails the test run just as unambiguously.
+//! Worker threads check invariants with `std.debug.assert`: std.Thread
+//! cannot propagate errors to the spawning test. An assertion aborts the
+//! process and fails the test run.
 
 const std = @import("std");
 const testing = std.testing;
@@ -29,12 +23,9 @@ const FrameQueue = frame_queue.FrameQueue;
 const OuterThreadPool = outer_thread_pool.OuterThreadPool;
 const InnerThreadPool = thread_pool.InnerThreadPool;
 
-/// Test helper: ArrayListUnmanaged.resize() does not value-initialize
-/// newly added elements -- growing from empty leaves `items[0]` as
-/// uninitialized memory. Only initializes on first growth from empty, so
-/// a slot being *reused* (already at length 1, as in the
-/// buffer-capacity-reuse test below) keeps its existing DecodedTexture
-/// (and thus its already-sized `data` buffer) untouched.
+/// Initialize `items[0]` only when growing from empty: resize() leaves new
+/// elements uninitialized. Reused slots keep their existing DecodedTexture
+/// and data-buffer capacity for the reuse test.
 fn ensureOneTexture(list: *std.ArrayListUnmanaged(hap_frame.DecodedTexture), allocator: std.mem.Allocator) !void {
     if (list.items.len == 0) {
         try list.resize(allocator, 1);
@@ -80,9 +71,8 @@ test "retire ring cycles through all slots in order" {
 }
 
 test "retire ring writer stays two slots behind reader" {
-    // With depth 3, the slot a writer is about to fill was last "current"
-    // two commits ago -- i.e. it was retired (no longer the display slot)
-    // for a full extra generation beyond Godot's frame-queue depth of 2.
+    // Depth 3 keeps the next writable slot distinct from the slot that was
+    // current before the last two commits.
     const Ring = RetireRing(3);
     var ring: Ring = .{};
     const slot_two_generations_ago = ring.currentSlot();
@@ -150,10 +140,8 @@ test "frame queue peek/pop on empty is safe" {
 }
 
 test "frame queue slots reuse buffer capacity" {
-    // A slot's DecodedTexture buffer should retain its capacity across a
-    // pop/refill cycle when the new frame is the same size (steady-state
-    // playback), i.e. no reallocation on the happy path. With depth 2,
-    // the ring returns to slot 0 on the 3rd write (0, 1, 0, 1, ...).
+    // Same-size refills must retain the slot's texture-buffer capacity.
+    // Depth 2 returns to slot 0 on the third write (0, 1, 0, 1, ...).
     var q = try FrameQueue.init(testing.allocator, 2);
     defer q.deinit();
 
@@ -553,10 +541,8 @@ test "thread pool large count" {
 }
 
 // -----------------------------------------------------------------------
-// Chunked decode through the shared InnerThreadPool: a single-chunk frame
-// decodes inline on the calling thread, while a multi-chunk frame drives
-// the pool. Both must round-trip to the original texture bytes. (Pool
-// dispatch behavior, not decode-format coverage -- decoder_test owns that.)
+// Single-chunk frames decode inline; multi-chunk frames use InnerThreadPool.
+// Both must reproduce the original bytes. decoder_test covers formats.
 // -----------------------------------------------------------------------
 
 test "single-chunk frame decodes inline" {

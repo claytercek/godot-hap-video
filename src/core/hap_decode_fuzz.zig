@@ -1,29 +1,17 @@
-//! hap_decode_fuzz.zig -- zig-native fuzz harness for decoder.decode(), the
-//! per-frame Hap parser/decompressor (hap_decode.zig, invoked through
-//! decoder.zig). Mirrors demuxer_fuzz.zig's Smith-based pattern -- see that
-//! module's doc comment for the shared rationale (corpus replay semantics,
-//! why coverage-guided `--fuzz` doesn't link for this project, and the
-//! HAP_FUZZ_SECONDS bounded loop as the practical local substitute). This
-//! file only covers what's different:
+//! Fuzz decoder.decode(), exercising hap_decode.zig's frame parser and
+//! decompressor. See demuxer_fuzz.zig for Smith replay semantics, --fuzz
+//! link failures, and the HAP_FUZZ_SECONDS bounded-loop fallback.
 //!
-//!  * The target is a single frame's bytes, not a whole MOV container, and
-//!    the interesting bugs live deep inside section/table parsing -- raw
-//!    random bytes almost never get past the first 4-byte header check
-//!    (`readSectionHeader`'s size-vs-buffer bound). So on top of raw random
-//!    bytes, this harness also seeds the loop with syntactically valid
-//!    frames (built with the same buildRawFrame/createChunkedFrame builders
-//!    the unit tests use, covering every supported format nibble, the
-//!    Complex/chunked path, and a Multi-Image/HapM frame) and mutates them
-//!    (byte flips, truncation, splices) so generated inputs still parse far
-//!    enough to stress section-table bounds and chunk decode instructions.
-//!  * The invariant checked is decoder.zig's own contract: no crash, no
-//!    leak (testing.allocator), no hang, and on error `output` is left
-//!    empty (`error.InvalidFrame`/`error.OutOfMemory` are both an expected,
-//!    passing outcome -- only a mismatch with that contract, or a crash,
-//!    fails the run).
-//!  * The existing tests/fixtures/fuzz_regressions/*.bin corpus (whole MOV
-//!    files, not Hap frames) is replayed here too -- free coverage; they
-//!    should all cleanly fail frame-level parsing with error.InvalidFrame.
+//! Raw random bytes rarely pass readSectionHeader's initial 4-byte bounds
+//! check. Also mutate seed frames built with buildRawFrame/createChunkedFrame
+//! to reach section tables and chunk instructions. Seeds cover supported
+//! format nibbles, Complex chunks, and Multi-Image/HapM; mutations flip
+//! bytes, truncate, or splice data.
+//!
+//! Require no crash, leak (checked by testing.allocator), or hang, and
+//! empty output on error. error.InvalidFrame and error.OutOfMemory both
+//! pass if output is empty. Replay tests/fixtures/fuzz_regressions/*.bin
+//! too; these whole MOV files should fail frame parsing with InvalidFrame.
 
 const std = @import("std");
 const testing = std.testing;
@@ -36,22 +24,14 @@ const test_support = @import("test_support.zig");
 const MmapReader = mmap_reader.MmapReader;
 const DecodedFrame = hap_frame.DecodedFrame;
 
-/// Cap on the byte buffer handed to decoder.decode() per fuzz iteration. A
-/// single Hap frame is far smaller than a whole MOV; 1 MiB is generous and
-/// keeps iterations fast.
+/// Limit each decoder.decode() input to 1 MiB to keep iterations fast.
 const max_input_len = 1 << 20; // 1 MiB
 
-/// Section type byte for a top-level Multi-Image (HapM) container --
-/// hap_decode.zig's private `section_multi_image`, duplicated here per this
-/// project's no-cross-file-export-for-one-constant convention (see
-/// hap_decode.zig's own wire-format constants, similarly duplicated in
-/// test_support.zig).
+/// Multi-Image (HapM) type byte, matching hap_decode.zig's private constant.
 const section_multi_image: u8 = 0x0D;
 
-/// Decode `smith`'s bytes through decoder.decode() and check the contract:
-/// success, or a typed error with `output` left empty. Anything else
-/// (a crash, a leak caught by testing.allocator, or a mismatch here) fails
-/// the fuzz run.
+/// Decode Smith's bytes. Accept success or a typed error with empty output;
+/// crashes, allocator-detected leaks, and contract violations fail the run.
 fn fuzzDecode(context: void, smith: *testing.Smith) !void {
     _ = context;
 
@@ -68,9 +48,7 @@ fn fuzzDecode(context: void, smith: *testing.Smith) !void {
 }
 
 // -----------------------------------------------------------------------
-// Structure-aware seed frames: syntactically valid Hap frames the mutation
-// loop below starts from, so it penetrates past the top-level header check
-// into section/table parsing.
+// Seed frames for mutations that reach section/table parsing.
 // -----------------------------------------------------------------------
 
 /// Build a handful of syntactically valid Hap frames covering: every
@@ -103,10 +81,8 @@ fn buildSeedFrames(allocator: std.mem.Allocator) !std.ArrayListUnmanaged([]u8) {
         try list.append(allocator, try test_support.createChunkedFrame(allocator, &compressible, chunk_count, .rgb_dxt1));
     }
 
-    // Multi-Image (HapM): two single-texture sub-sections back to back,
-    // wrapped in a section_multi_image container. buildRawFrame's output
-    // shape ([size24][type][payload]) is exactly the generic section
-    // encoding, so it doubles as the sub-section/container builder here.
+    // Wrap two adjacent texture sections in Multi-Image (HapM).
+    // buildRawFrame's [size24][type][payload] layout also builds containers.
     {
         const sub0 = try test_support.buildRawFrame(allocator, &bc, 0xAF); // None|YCoCg
         defer allocator.free(sub0);
@@ -134,12 +110,9 @@ fn freeSeedFrames(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged([]
 }
 
 // -----------------------------------------------------------------------
-// Smoke test: the existing MOV-file regression corpus (replayed here for
-// free coverage -- they're whole containers, not Hap frames, so they should
-// all cleanly return error.InvalidFrame) plus the synthetic seed frames
-// above. Under a plain `zig build test` each corpus entry is replayed once
-// (through Smith's length-prefix-quirked read -- see demuxer_fuzz.zig's doc
-// comment) plus one implicit empty-input run.
+// Smoke test MOV regressions and synthetic seeds. MOV containers should
+// return InvalidFrame. Plain `zig build test` replays each entry through
+// Smith's length-prefix read, then runs an implicit empty-input case.
 // -----------------------------------------------------------------------
 
 const regression_paths = [_][]const u8{
@@ -173,11 +146,8 @@ test "fuzz decoder.decode on arbitrary bytes" {
 }
 
 // -----------------------------------------------------------------------
-// Opt-in, time-boxed random fuzz loop -- see demuxer_fuzz.zig's doc comment
-// for why this "dumb" (uncoverage-guided) loop is the practical local
-// substitute for `zig build test --fuzz` on this module. Each iteration
-// picks one of two generation strategies: raw random bytes, or a mutated
-// copy of one of the seed frames above (byte flip / truncate / splice).
+// Opt-in bounded loop without coverage feedback; see demuxer_fuzz.zig for
+// --fuzz link limits. Generate raw random bytes or mutate a seed frame.
 // -----------------------------------------------------------------------
 
 /// Cap on the random-bytes strategy's generated length -- large enough to
@@ -191,11 +161,9 @@ fn fillRandomBytes(random: std.Random, buf: []u8) usize {
     return len;
 }
 
-/// Copy a random seed frame into `buf` and apply a small number of random
-/// mutations (byte flip, truncation, or a short random splice), returning
-/// the resulting length. Mutating real frames -- rather than only ever
-/// generating fresh random bytes -- is what lets this loop reach
-/// section-table and chunk-bounds logic that a valid header alone gates.
+/// Copy a random seed into `buf`, flip bytes, truncate, or splice random
+/// bytes, and return its new length. Seeds help reach section-table and
+/// chunk-bounds checks beyond the header.
 fn mutateSeed(random: std.Random, seeds: []const []const u8, buf: []u8) usize {
     if (seeds.len == 0) return 0;
 

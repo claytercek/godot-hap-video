@@ -1,15 +1,11 @@
 name: Sanitizers
 
-# Sanitizer / safety-check lanes for the core test suite (`zig build test`),
-# run on every PR and nightly. Two lanes, two
-# different guarantees:
-#
-#   - debug_safety: `-Dtest-optimize=debug` turns on Zig's own runtime safety
-#     checks (bounds, overflow, etc.) for the core Zig code.
-#   - ubsan: `-Dtest-optimize=debug -Dsanitize-c=full` layers
-#     UndefinedBehaviorSanitizer onto the vendored C/C++ the core links
-#     against (hap, minimp4, snappy).
-# No AddressSanitizer or ThreadSanitizer lane exists in this file.
+# Run `zig build test` on every PR and nightly:
+# - debug_safety: -Dtest-optimize=debug enables Zig runtime safety checks,
+#   including bounds and overflow checks.
+# - ubsan: -Dtest-optimize=debug -Dsanitize-c=full adds UndefinedBehaviorSanitizer
+#   to the vendored C/C++ (hap, minimp4, snappy).
+# This workflow has no AddressSanitizer or ThreadSanitizer lane.
 
 on:
   pull_request:

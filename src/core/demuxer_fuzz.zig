@@ -1,68 +1,36 @@
-//! demuxer_fuzz.zig -- zig-native fuzz harness for Demuxer.open(), the
-//! untrusted-structure surface (arbitrary bytes claiming to be a Hap MOV).
+//! Fuzz Demuxer.open() with arbitrary bytes presented as Hap MOV files.
+//! Construct `MmapReader{ .data = ..., .path = "<fuzz>" }` in memory to avoid
+//! per-iteration file I/O; the demuxer reads only reader.data.
 //!
-//! Zig 0.16 ships a built-in structured fuzzer (`std.testing.fuzz` +
-//! `std.testing.Smith`) instead of libFuzzer: rather than handing the
-//! target function a raw byte buffer, the test asks a `*Smith` for
-//! values/bytes/slices. Under `zig build test --fuzz[=N]` those calls are
-//! answered by Zig's own coverage-guided engine (in-process, LLVM SanCov
-//! -style edge coverage); under a plain `zig build test` (no --fuzz) they
-//! are answered deterministically from each `FuzzInputOptions.corpus`
-//! entry (one replay per entry, `Smith.in` set to that entry's bytes) plus
-//! one final implicit empty-input smoke run. See
-//! lib/zig/compiler/test_runner.zig's `fuzz()` for the exact semantics --
-//! that is also where a crash currently surfaces: the child process
-//! prints the error/stack trace to stderr and exits, but 0.16 does not
-//! persist a crashing input to disk anywhere (no libFuzzer-style
-//! `crash-<hash>` artifact file). A real finding must be captured from the
-//! run's stderr while it is still on screen (or bisected from the corpus)
-//! and turned into a fixture under tests/fixtures/fuzz_regressions/,
-//! replayed by fuzz_regressions_test.zig.
+//! Zig 0.16's std.testing.fuzz/Smith API generates structured values and
+//! slices. `zig build test --fuzz[=N]` uses its in-process coverage-guided
+//! engine with LLVM SanCov-style edge coverage. Plain `zig build test`
+//! replays each FuzzInputOptions.corpus entry through Smith.in, then runs
+//! one implicit empty-input case (see lib/zig/compiler/test_runner.zig).
+//! Crashes print errors and stack traces to stderr; Zig 0.16 does not save
+//! crash-<hash> files. Capture findings from stderr or bisect the corpus,
+//! then add fixtures to tests/fixtures/fuzz_regressions/ for exact replay
+//! by fuzz_regressions_test.zig.
 //!
-//! MmapReader only maps real files by design (a deliberate constraint for
-//! production use), but its fields are public, so this harness builds an
-//! in-memory `MmapReader{ .data = ..., .path = "<fuzz>" }` directly --
-//! functionally identical to a real mmap from Demuxer.open()'s point of
-//! view (it only ever reads through `reader.data`) and avoids
-//! per-iteration file I/O.
+//! Load MOV fixtures and regression inputs at startup with MmapReader;
+//! paths are relative to the repo root, the test working directory.
+//! Zig 0.16 restricts @embedFile to the compiling module's package path
+//! (src/core/). `@embedFile("../../tests/fixtures/...")` fails with
+//! "embed of file outside package path". Module.addEmbedPath only extends
+//! C #embed searches, so the corpus must be loaded at runtime.
 //!
-//! Corpus seeding: the real .mov fixtures and the fuzz_regressions crash
-//! corpus are read at test-startup via `MmapReader` (same relative-path
-//! convention as mmap_reader.zig's and fuzz_regressions_test.zig's fixture
-//! tests -- `zig build test` runs with the repo root as its cwd) and
-//! passed to `FuzzInputOptions.corpus`. `@embedFile` was tried first but
-//! doesn't work here: zig 0.16 enforces that `@embedFile` targets stay
-//! within the *compiling module's* package path (the directory containing
-//! its root_source_file, src/core/ for this module), so a
-//! `@embedFile("../../tests/fixtures/...")` is rejected at comptime with
-//! "embed of file outside package path" -- `Module.addEmbedPath` does not
-//! help; it only extends the C-source `#embed` search path, not
-//! `@embedFile`'s. Reading the corpus at runtime sidesteps the boundary
-//! entirely and matches the pattern already used elsewhere in this file's
-//! package.
+//! Smith replay transforms corpus bytes: Smith.slice() consumes a 4-byte
+//! little-endian length prefix and clamps the remainder to the target
+//! buffer. Smith accessors consume a grammar; Zig 0.16's public API cannot
+//! replay seed bytes verbatim. Plain tests therefore exercise offset,
+//! length-capped MOV content rather than exact original files.
 //!
-//! Seeding is also not a literal-byte replay: `Smith.slice()` reads a
-//! 4-byte little-endian length prefix off the front of each corpus entry
-//! before treating the remainder as content, and clamps to the target
-//! buffer size. That is a structural property of Zig's Smith-based fuzzer
-//! (every `smith.*` accessor consumes a fixed grammar from the backing
-//! bytes, not raw pass-through) and is inherently different from
-//! AFL/libFuzzer-style raw corpus replay -- there is no way to seed the
-//! exact original bytes through the public API in 0.16. It still
-//! exercises Demuxer.open() against real MOV byte content on every plain
-//! `zig build test` run, just offset and length-capped.
-//!
-//! `zig build test --fuzz` (the real coverage-guided engine) does not
-//! currently link for this module: `-ffuzz` instruments the vendored C
-//! sources (minimp4.c, snappy.cc) with clang's classic
-//! `-fsanitize-coverage=trace-cmp` calls (`__sanitizer_cov_trace_cmp*` /
-//! `_switch` / `_const_cmp*`), but Zig's own from-scratch fuzzer runtime
-//! doesn't implement that ABI -- only the pure-Zig coverage path does,
-//! confirmed again on Zig 0.17.0, aarch64-macos. The
-//! `HAP_FUZZ_SECONDS`-gated test below is the practical local substitute
-//! (see its doc comment). scripts/fuzz_demuxer.sh first tries the
-//! coverage-guided engine with `-Dtest-optimize=fast`, then falls back to
-//! the bounded random-input loop.
+//! `zig build test --fuzz` fails to link this module: -ffuzz instruments
+//! minimp4.c/snappy.cc with clang -fsanitize-coverage=trace-cmp calls
+//! (__sanitizer_cov_trace_cmp*, _switch, _const_cmp*) that Zig's fuzzer
+//! runtime does not implement. This also failed on Zig 0.17.0,
+//! aarch64-macos. scripts/fuzz_demuxer.sh tries coverage-guided fuzzing with
+//! -Dtest-optimize=fast, then falls back to the HAP_FUZZ_SECONDS bounded loop.
 
 const std = @import("std");
 const testing = std.testing;
@@ -88,10 +56,8 @@ fn fuzzOpen(context: void, smith: *testing.Smith) !void {
     var dem: Demuxer = .{};
     defer dem.deinit(testing.allocator);
 
-    // Fuzz-found inputs are raw bytes, not valid Hap MOVs in most cases --
-    // the only thing under test is that open() returns normally (no
-    // crash/leak/hang), not that it succeeds. A typed failure is the
-    // expected outcome for almost every input.
+    // Most inputs are invalid MOVs. A typed error is acceptable; crashes,
+    // leaks, and hangs fail the run.
     dem.open(testing.allocator, &reader) catch {};
     if (dem.audio) |*audio| {
         var output: [67]f32 = @splat(123);
@@ -143,18 +109,10 @@ test "fuzz Demuxer.open on arbitrary bytes" {
     try testing.fuzz({}, fuzzOpen, .{ .corpus = corpus[0..corpus_len] });
 }
 
-// Opt-in, time-boxed random fuzz loop -- the practical local substitute
-// for `zig build test --fuzz` while that engine can't link against this
-// module's vendored C sources (see the module doc comment). No-op unless
-// `HAP_FUZZ_SECONDS` is set (skipped, not run, on a plain
-// `zig build test`); driven by scripts/fuzz_demuxer.sh.
-//
-// This is "dumb" (uncoverage-guided) random fuzzing: each iteration
-// fills a buffer from a PRNG and feeds it to `Smith.in`, the same
-// deterministic-replay path corpus entries take above -- there is no
-// feedback loop steering generation toward new coverage, just volume.
-// Still meaningfully exercises Demuxer.open()'s bounds/overflow guards
-// against a wide spread of malformed inputs per run.
+// Bounded random loop driven by scripts/fuzz_demuxer.sh; skip unless
+// HAP_FUZZ_SECONDS is set. Feed PRNG bytes through Smith.in to exercise
+// bounds/overflow checks. Generation uses no coverage feedback; this
+// substitutes for --fuzz while the vendored C sources prevent linking.
 test "bounded randomized fuzz (opt-in via HAP_FUZZ_SECONDS)" {
     const raw = std.c.getenv("HAP_FUZZ_SECONDS") orelse return error.SkipZigTest;
     const seconds = std.fmt.parseInt(u32, std.mem.span(raw), 10) catch return error.SkipZigTest;

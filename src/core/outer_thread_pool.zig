@@ -1,34 +1,18 @@
-//! outer_thread_pool.zig
+//! Shared, bounded worker pool. `submit()` accepts one-shot jobs without a
+//! stream lifetime. `submitForStream()` runs open/decode jobs serially in
+//! submission order for each stream key. This ties teardown accounting to
+//! the same key and preserves FrameQueue's SPSC contract. Different streams
+//! may run concurrently.
 //!
-//! A shared, bounded worker pool used for two kinds of jobs:
+//! The process-wide singleton defaults to `kDefaultWorkers` (3), shared by
+//! all streams. thread_pool.zig imports this constant to size InnerThreadPool.
 //!
-//!  - Unbound one-shot jobs (`submit()`), for work with no stream lifetime.
-//!  - Per-stream jobs (`submitForStream()`): async open and decode work.
-//!    Jobs sharing a stream key never run concurrently and always run in
-//!    submission order. This both keeps open/teardown lifetime accounting
-//!    on the same key and preserves the "each stream decodes strictly
-//!    serially" invariant the SPSC FrameQueue depends on, while different
-//!    streams can still use different workers.
+//! Submission heap-allocates a closure with an intrusive Job node, captures
+//! args by value, and frees the closure after running. Call sites capture
+//! stable pointers (e.g. *DecodeScheduler) and small values, as with
+//! std.Thread.Pool.spawn.
 //!
-//! Default worker count is `kDefaultWorkers` (3), shared across all
-//! streams — never one pool per stream. This is a singleton for the same
-//! reason InnerThreadPool is: the whole point of the two-level design is
-//! one shared outer pool process-wide.
-//!
-//! `kDefaultWorkers` is owned here (not duplicated) — thread_pool.zig
-//! imports it to derive InnerThreadPool's size.
-//!
-//! Job model: `submit`/`submitForStream` heap-allocate a small self-freeing
-//! closure capturing `args` by value (holding an intrusive `Job` node; the
-//! closure frees itself immediately after running) — the same pattern as
-//! `std.Thread.Pool.spawn`. All call sites capture a stable pointer
-//! (e.g. `*DecodeScheduler`) plus small values.
-//!
-//! Mutex/Condition: see sync.zig's module docs for the full Zig-0.16
-//! rationale (`std.Thread.Mutex`/`Condition` were removed upstream with no
-//! std-provided replacement suitable for synchronizing genuinely
-//! concurrent OS threads). frame_queue.zig and decode_scheduler.zig import
-//! `Mutex` from sync.zig directly, same as this module.
+//! Mutex/Condition come from sync.zig; see its Zig 0.16 compatibility notes.
 
 const std = @import("std");
 
@@ -43,10 +27,8 @@ const Condition = sync.Condition;
 /// pools stay consistent from this single definition (see thread_pool.zig).
 pub const kDefaultWorkers: u32 = 3;
 
-/// Intrusive job node. `submit`/`submitForStream` embed this as the first
-/// field of a heap-allocated closure (see module docs); `runFn` is set to
-/// a small trampoline that invokes the user's function with its captured
-/// arguments and frees the closure.
+/// First field of each heap-allocated job closure. runFn invokes the user's
+/// function with captured arguments, then frees the closure.
 pub const Job = struct {
     node: std.DoublyLinkedList.Node = .{},
     runFn: *const fn (*Job) void,
@@ -83,11 +65,9 @@ pub const OuterThreadPool = struct {
     /// decremented once that job's runFn returns.
     in_flight: u32 = 0,
 
-    /// Create a pool with the given number of worker threads (clamped to
-    /// a minimum of 1). Returns a heap-allocated pool (held by pointer):
-    /// worker threads capture the pool's address, so it must live at a
-    /// stable location -- callers must call `destroy` exactly once, after
-    /// which the pointer is invalid.
+    /// Create at least one worker and return a heap-allocated pool. Workers
+    /// capture its address, so it must remain stable. Call `destroy` exactly
+    /// once; the pointer is invalid afterward.
     pub fn create(allocator: std.mem.Allocator, requested_workers: u32) !*OuterThreadPool {
         const n = @max(@as(u32, 1), requested_workers);
 
@@ -249,11 +229,9 @@ pub const OuterThreadPool = struct {
         }
     }
 
-    /// Block until no job is queued or running for `stream_id`. A stream
-    /// owner (e.g. DecodeScheduler) must call this before destroying
-    /// anything a still-running or still-queued job for that stream might
-    /// touch -- jobs capture `this`-equivalent pointers, and the pool has
-    /// no way to cancel a job once submitted.
+    /// Wait until `stream_id` has no queued or running jobs. Call before
+    /// destroying anything those jobs may access: jobs capture owner
+    /// pointers and cannot be cancelled after submission.
     pub fn waitForStreamIdle(self: *OuterThreadPool, stream_id: u64) void {
         self.mutex.lock();
         defer self.mutex.unlock();

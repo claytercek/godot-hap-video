@@ -1,5 +1,5 @@
-//! PlaybackController is the authoritative, Godot-free playback clock and
-//! policy for both the stock VideoStreamPlayer adapter and HapPlayer.
+//! Godot-free playback clock and policy shared by the stock
+//! VideoStreamPlayer adapter and HapPlayer.
 
 pub const PlaybackController = @This();
 

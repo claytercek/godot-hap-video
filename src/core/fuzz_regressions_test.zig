@@ -1,15 +1,9 @@
-//! fuzz_regressions_test.zig — replays fixed fuzzer-found crash inputs.
+//! Replay exact inputs from tests/fixtures/fuzz_regressions/ that once
+//! crashed, hung, leaked, or exhausted memory in Demuxer.open(). Regressions
+//! fail the ordinary test suite without needing a fuzz run.
 //!
-//! Each fixture under tests/fixtures/fuzz_regressions/ is a raw input
-//! that previously crashed, hung, leaked, or OOM'd Demuxer.open(); the
-//! bugs are fixed and this replays the exact inputs deterministically, so
-//! a regression shows up as an ordinary crash/leak/hang in this suite
-//! instead of only in an occasional local fuzz run.
-//!
-//! Zig adaptation: directory iteration goes through std.Io.Dir (0.16
-//! moved std.fs.Dir's iteration API there, gated behind an `Io`
-//! instance -- see test_support.zig's module docs for the same
-//! Zig-0.16-idiom rationale used elsewhere in this suite).
+//! Directory iteration uses std.Io.Dir and an Io instance; Zig 0.16 moved
+//! this API out of std.fs.Dir.
 
 const std = @import("std");
 const testing = std.testing;
@@ -22,9 +16,8 @@ const MmapReader = mmap_reader.MmapReader;
 const Demuxer = demuxer_mod.Demuxer;
 const io = test_support.io;
 
-/// Fuzz-found inputs are raw bytes, not valid Hap MOVs in most cases --
-/// the only thing under test is that open() returns normally (no
-/// crash/leak/hang), not that it succeeds.
+/// Require open() to return without crashing, leaking, or hanging.
+/// Most fuzz inputs are invalid MOVs; a typed error is acceptable.
 fn replay(path: []const u8) !void {
     var reader = try MmapReader.init(path);
     defer reader.deinit();

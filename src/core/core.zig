@@ -1,6 +1,5 @@
-//! Root of the pure-Zig engine core.
-//! No Godot dependency; only the vendored C libraries (hap, snappy,
-//! minimp4) compiled alongside this module (see build.zig).
+//! Godot-free Zig engine core. build.zig compiles the vendored snappy and
+//! minimp4 libraries alongside this module.
 
 const std = @import("std");
 

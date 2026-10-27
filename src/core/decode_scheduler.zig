@@ -1,15 +1,8 @@
-//! decode_scheduler.zig
-//!
-//! Per-stream decode pipeline: async open + continuous serial decode into
-//! a FrameQueue, run entirely on the shared OuterThreadPool.
-//!
-//! One DecodeScheduler owns one stream's mmap, demuxer, decoder, and
-//! frame queue. Its decode work always runs via
-//! OuterThreadPool.submitForStream(stream_id), which guarantees at most
-//! one fill step for this stream is ever in flight -- the "each stream
-//! decodes strictly serially" invariant the SPSC queue depends on --
-//! while other streams' schedulers run concurrently on the same shared
-//! pool.
+//! Open a stream asynchronously and decode serially into its FrameQueue
+//! on the shared OuterThreadPool. Each scheduler owns its stream's mmap,
+//! demuxer, decoder, and queue. submitForStream(stream_id) permits one fill
+//! step per stream at a time, as required by the SPSC queue; other streams
+//! can decode concurrently.
 //!
 //! Usage:
 //!   var scheduler = try DecodeScheduler.init(allocator);
@@ -23,29 +16,19 @@
 //!   frame.?.consume();
 //!   _ = scheduler.notifyCapacityAvailable(); // resume prefetch
 //!
-//! Seeking: requestFrame() again with a different index. The in-flight
-//! decode (if any) finishes first -- Snappy decode and hap_decode.zig's
-//! frame parsing are not cancellation-safe -- then the queue is drained
-//! and refilled from the new position. Calling requestFrame() again
-//! before the previous seek has been applied simply overwrites the
-//! target: latest seek wins.
+//! Seek with requestFrame(). In-flight decode finishes before the queue
+//! drains and refills: Snappy and hap_decode.zig parsing cannot be safely
+//! cancelled. A new request replaces any pending seek; the latest wins.
 //!
-//! Design notes:
-//!   * Open completion is published as scheduler-owned state. Callers poll
-//!     `openStatus()` and then inspect the typed `openError()` on failure;
-//!     no callback can outlive its owner or deinitialize the scheduler from
-//!     its own stream job.
-//!   * `openAsync` duplicates the path into owned storage (freed in
-//!     `deinit`) because the deferred job reads it back off `self` at run
-//!     time, so that storage must outlive the (possibly deferred) job.
-//!   * `demuxer.open()`/`decoder.decode()` require an explicit
-//!     `std.mem.Allocator` (see demuxer.zig/decoder.zig); `DecodeScheduler`
-//!     stores the allocator it was constructed with and threads it through.
+//! Poll `openStatus()` and inspect `openError()` on failure. Completion
+//! stays in scheduler-owned state, so no callback can outlive its owner or
+//! destroy the scheduler from its own stream job. `openAsync` copies the
+//! path until `deinit`, keeping it alive for deferred jobs. The scheduler
+//! passes its allocator to demuxer.open() and decoder.decode().
 //!
-//! `deinit` releases queue → demuxer → mmap after
-//! `OuterThreadPool.waitForStreamIdle()` because a queued/in-flight fill
-//! step captures `self` and must never observe this object mid- or
-//! post-destruction.
+//! `deinit` waits for OuterThreadPool.waitForStreamIdle(), then releases
+//! queue -> demuxer -> mmap. Queued and running jobs capture `self` and
+//! must finish before destruction.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -65,11 +48,8 @@ const FrameQueue = frame_queue.FrameQueue;
 const VideoTrackInfo = hap_frame.VideoTrackInfo;
 const Mutex = sync.Mutex;
 
-/// Every way an async open can fail: the demuxer's own precise failure set
-/// plus the one failure that happens before the demuxer is even reached
-/// (the file couldn't be mmap'd). The human-readable message is formatted
-/// at the display edge from this typed value -- no borrowed scratch string
-/// ever crosses the thread boundary.
+/// Async open failures: mmap failure or a typed demuxer error. The display
+/// layer formats messages; no borrowed scratch string crosses threads.
 pub const OpenError = demuxer_mod.OpenError || error{FileOpenFailed};
 
 /// Errors returned synchronously by `openAsync` before its completion is
@@ -112,12 +92,9 @@ pub const DecodeScheduler = struct {
     decode_status: std.atomic.Value(DecodeStatus) = .init(.idle),
     decode_error: ?DecodeError = null,
 
-    // All seek/cursor state below is guarded by mutex. Grouping it under
-    // one lock closes the tearing hazard where two concurrent
-    // requestFrame() calls could interleave a target from one with a
-    // direction from the other: requestFrame() writes the pending seek
-    // (target+direction) as one struct assignment, within one critical
-    // section, and fillStep() consumes it in one critical section.
+    // mutex guards all seek/cursor state below. requestFrame() writes the
+    // pending (target, direction) pair in one critical section; fillStep()
+    // consumes it under the same lock, preventing mixed concurrent requests.
     mutex: Mutex = .{},
 
     // Set under mutex before teardown waits for stream work. Every public
@@ -129,11 +106,8 @@ pub const DecodeScheduler = struct {
     // Pending seek, applied by the next fillStep invocation.
     pending_seek: ?PendingSeek = null,
 
-    // Decode cursor: next frame index the fill step will decode. Signed
-    // so a reverse fill that has just decoded frame 0 can step to -1 and
-    // let the ordinary can_decode range check below reject it, rather
-    // than needing a separate "reverse exhausted" flag to guard against
-    // unsigned underflow.
+    // Next frame to decode. Signed so reverse fill can step from 0 to -1;
+    // can_decode rejects it without unsigned underflow or an exhausted flag.
     cursor: i64 = 0,
 
     // Active decode direction, latched from the pending seek's direction
@@ -279,13 +253,9 @@ pub const DecodeScheduler = struct {
         return self.stream_id;
     }
 
-    /// Begin an asynchronous open: mmap + demux + validate, run as a
-    /// stream-bound job on the outer pool (stream-bound, not a plain
-    /// one-shot submit, so waitForStreamIdle() in deinit also covers this
-    /// job: if the scheduler is torn down before open completes, deinit
-    /// must block on it too). Completion is polled through `openStatus()`
-    /// and `openError()`; there is no callback whose lifetime can outlast
-    /// the caller's owner object.
+    /// Map, demux, and validate asynchronously on the outer pool. Bind the
+    /// job to this stream so deinit's waitForStreamIdle() also waits for open.
+    /// Poll `openStatus()` and `openError()` for completion; no callback runs.
     pub fn openAsync(self: *DecodeScheduler, path: []const u8) OpenAsyncError!void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -317,17 +287,12 @@ pub const DecodeScheduler = struct {
         self.open_status.store(.open, .release);
     }
 
-    /// Request that decode proceed from `frame_index`, in either temporal
-    /// direction. On first call after open, this starts prefetch from
-    /// `frame_index`. On subsequent calls (a different index and/or a
-    /// direction flip), this is a seek: the queue is drained and refilled
-    /// from the new position/direction once the in-flight decode (if
-    /// any) completes. `forward = false` decodes backward (frame_index,
-    /// frame_index-1, ...), stopping cleanly at frame 0 -- Hap is
-    /// all-keyframe, so reverse is this queue-management behavior, not a
-    /// different decode path.
-    /// Returns false once teardown has closed work admission or decode has
-    /// entered its terminal failed state.
+    /// Prefetch from `frame_index` in the requested direction. Later calls
+    /// seek: finish in-flight decode, then drain and refill from the new
+    /// position/direction. `forward = false` decodes frame_index,
+    /// frame_index-1, ... through frame 0. Hap is all-keyframe, so reverse
+    /// uses the same decoder with different queue ordering.
+    /// Return false after teardown closes admission or decode fails terminally.
     pub fn requestFrame(self: *DecodeScheduler, frame_index: u32, forward: bool) bool {
         // Target + direction land in one struct assignment, in one critical
         // section, so a concurrent requestFrame() can only ever leave a
@@ -367,13 +332,10 @@ pub const DecodeScheduler = struct {
     }
 
     fn fillStep(self: *DecodeScheduler) void {
-        // Phase 1: under the lock, consume any pending seek and snapshot
-        // the cursor state. Only fillStep mutates cursor/forward and the
-        // outer pool serializes fillSteps per stream, so the snapshot
-        // stays valid across the unlocked decode below. Honors
-        // "queue-behind": any decode already in flight finished before
-        // this job ran, and the latest seek wins because requestFrame
-        // simply overwrote pending_seek.
+        // Phase 1: consume the latest pending seek and snapshot the cursor
+        // under lock. Only fillStep mutates cursor/forward, and per-stream
+        // serialization keeps the snapshot valid during unlocked decode.
+        // Any earlier decode has finished at this queue-behind boundary.
         var do_drain = false;
         var frame_index: i64 = undefined;
         var forward: bool = undefined;
@@ -436,12 +398,9 @@ pub const DecodeScheduler = struct {
                 return;
             }
 
-            // Advance the cursor past the frame just decoded. Reaching the
-            // start of the stream going backward sets cursor to -1, which
-            // the range check in can_decode above rejects on the next
-            // round -- no separate "reverse exhausted" flag needed, and a
-            // later forward request still resumes correctly since it
-            // simply overwrites cursor via pending_seek.
+            // Advance past the decoded frame. Reverse reaches -1 after
+            // frame 0; can_decode rejects it next time. A later seek replaces
+            // cursor via pending_seek, allowing forward playback to resume.
             if (decoded_one) {
                 self.cursor = if (forward) frame_index + 1 else frame_index - 1;
             }

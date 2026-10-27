@@ -1,7 +1,5 @@
-## Shared helpers for the manual smoke-test scripts (smoke_test.gd,
-## smoke_test2.gd): building a HapPlayer/HapVideoStream pair and waiting for
-## the player to finish opening. Kept intentionally minimal -- these are
-## manual harnesses, not an automated suite.
+## Build HapPlayer/HapVideoStream pairs and await opening for the manual
+## scripts smoke_test.gd and smoke_test2.gd.
 class_name SmokeCommon
 extends RefCounted
 
@@ -15,12 +13,10 @@ static func make_player(tree: SceneTree) -> HapPlayer:
 	tree.root.add_child(player)
 	return player
 
-## Polls process_frame until `player` emits "opened" or `max_frames` elapse.
-## Returns whether the signal fired. Must be called (with `await`) after the
-## caller has connected its own signal handlers and assigned player.stream.
+## Poll process_frame until "opened" or max_frames; return whether it fired.
+## Await this after connecting the caller's handlers and assigning player.stream.
 static func wait_for_opened(tree: SceneTree, player: HapPlayer, max_frames: int = 120) -> bool:
-	# Boxed in an array: GDScript lambdas capture locals by value, so a
-	# plain `opened = true` inside the handler would never be observed here.
+	# GDScript lambdas capture locals by value; share changes through an array.
 	var opened := [false]
 	var on_opened := func(): opened[0] = true
 	player.connect("opened", on_opened)

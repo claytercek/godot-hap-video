@@ -249,8 +249,8 @@ func _verify() -> void:
 	if not await _silent("VideoStreamPlayer volume"):
 		return
 	stock.volume_db = -3.0
-	# Stock speed_scale belongs to Godot's pitch-changing resampler; it is not
-	# visible to playback virtuals and must NOT mute embedded PCM at non-1x.
+	# Godot's pitch-changing resampler owns speed_scale; playback virtuals cannot
+	# see it. Embedded PCM must remain audible at non-1x.
 	stock.speed_scale = 0.5
 	if not await _audible("VideoStreamPlayer speed_scale"):
 		return
@@ -258,8 +258,8 @@ func _verify() -> void:
 	stock.audio_track = 1
 	if not await _silent("VideoStreamPlayer unsupported track"):
 		return
-	# This seek is a separate ordinary control test. The phase-changing stereo
-	# tests below restore track 0 WITHOUT a seek, validating its live queue.
+	# Test seeking separately; the phase-changing stereo tests below restore
+	# track 0 without seeking to check its live queue.
 	stock.stream_position = 0.2
 	stock.audio_track = 0
 	if not await _audible("VideoStreamPlayer first track restored"):
@@ -339,10 +339,9 @@ func _verify_stereo(path: String) -> bool:
 	if not await _pattern("HapPlayer %s forward seek" % path, true):
 		return false
 	hap.stream_position = 0.15
-	# The audio thread keeps capturing while the main thread is delayed. Force
-	# an oversized queue AFTER the full measurement window, not a source stall
-	# inside it. The same strict backward-seek content assertions must still
-	# judge exactly 120 ms, rather than diluting them with the later dropout.
+	# Delay the main thread after the full window while audio capture continues.
+	# The oversized queue must still yield exactly 120 ms for backward-seek
+	# assertions, excluding the later dropout.
 	var read_delay_msec := 900 if path == STEREO_FIXTURES[0] else 0
 	var stalled_playback_id := 0
 	if read_delay_msec > 0:
@@ -432,8 +431,8 @@ func _generator_playback_id(hap: Object) -> int:
 
 
 func _verify_unsupported() -> bool:
-	# Classification-only synthetic fixture: PCM payload with an unsupported
-	# mp4a FourCC. This is intentionally NOT an AAC bitstream or decoder test.
+	# Test classification with PCM labeled as unsupported mp4a.
+	# This synthetic payload is not AAC and does not test AAC decoding.
 	var bytes := FileAccess.get_file_as_bytes(STEREO_FIXTURES[0])
 	var marker := -1
 	for i in range(bytes.size() - 4, -1, -1):
@@ -590,8 +589,8 @@ func _video_sample_range(bytes: PackedByteArray, frame: int) -> Vector2i:
 		return Vector2i(-1, -1)
 	var constant_size := _be32(bytes, stsz.x + 4)
 	var count := _be32(bytes, stsz.x + 8)
-	# This deliberately small reader accepts the generator's single video
-	# chunk only, checking stsc rather than assuming the first mdat is video.
+	# Accept only the generator's single video chunk; verify stsc instead of
+	# assuming the first mdat contains video.
 	if (
 		frame < 0 or frame >= count
 		or _be32(bytes, stco.x + 4) != 1 or _be32(bytes, stsc.x + 4) != 1
@@ -617,8 +616,8 @@ func _restore_current_pattern(stock: VideoStreamPlayer, label: String) -> bool:
 	var data := PackedVector2Array()
 	var started := false
 	var deadline := Time.get_ticks_msec() + 1000
-	# Judge the FIRST audible frames, not a later window that can hide stale
-	# PCM draining from the disabled track. Ignore initial silence only.
+	# Skip initial silence, then judge the first audible frames to catch stale
+	# PCM draining from the disabled track.
 	while data.size() < 1024 and Time.get_ticks_msec() < deadline:
 		await get_tree().process_frame
 		var chunk := _capture.get_buffer(_capture.get_frames_available())
@@ -649,8 +648,8 @@ func _wait_open(hap: Object, label: String) -> bool:
 
 
 func _wait_audio_seconds(seconds: float) -> void:
-	# SceneTreeTimer subtracts the full frame delta, including time before its
-	# creation. Audio settling must instead elapse AFTER this wait starts.
+	# SceneTreeTimer counts the full frame delta, including time before creation.
+	# Measure audio settling time from the start of this wait.
 	var deadline := Time.get_ticks_usec() + ceili(seconds * 1000000.0)
 	while Time.get_ticks_usec() < deadline:
 		await get_tree().process_frame
@@ -661,10 +660,9 @@ func _stats(read_delay_msec: int = 0) -> Dictionary:
 	var begin := Time.get_ticks_usec()
 	var frames := ceili(AudioServer.get_mix_rate() * CAPTURE_WINDOW_SECONDS)
 	var deadline := Time.get_ticks_msec() + 1500
-	# A SceneTree timer only bounds when the main thread may resume. Reading
-	# ALL queued frames after it can turn 120 ms into a second of PCM followed
-	# by starvation silence, corrupting RMS and zero-crossing normalization.
-	# Wait for, then read, the exact oldest source-independent mix-frame window.
+	# Read exactly the oldest 120 ms at the mix rate, independent of source rate.
+	# A SceneTree timer can resume late; reading the full queue could include a
+	# second of PCM plus starvation silence, skewing RMS and zero-crossing rates.
 	while _capture.get_frames_available() < frames and Time.get_ticks_msec() < deadline:
 		await get_tree().process_frame
 	if _capture.get_frames_available() < frames:

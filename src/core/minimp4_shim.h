@@ -8,17 +8,13 @@
 extern "C" {
 #endif
 
-// Opaque handle wrapping a minimp4 MP4D_demux_t plus its read-callback
-// context. minimp4's structs are large and MINIMP4_ALLOW_64BIT-dependent;
-// hiding them behind this handle means the Zig demuxer never has to mirror
-// their layout -- it only ever sees this pointer and the scalar accessors
-// below.
+// Opaque handle owning MP4D_demux_t and its read-callback context. Scalar
+// accessors keep Zig independent of minimp4's MINIMP4_ALLOW_64BIT-dependent
+// struct layouts.
 typedef struct hap_mp4d_ctx hap_mp4d_ctx;
 
-// Parse `data[0..size)` as an MP4/MOV container. Returns a heap-allocated
-// context on success, or NULL on out-of-memory or a parse failure (mirrors
-// MP4D_open()'s combined success/failure return -- the two cases are not
-// distinguished).
+// Parse data[0..size) as MP4/MOV. Return a heap-allocated context on success,
+// or NULL for either allocation or parse failure, as MP4D_open() does.
 hap_mp4d_ctx *hap_mp4d_open(const uint8_t *data, int64_t size);
 
 // Releases a context returned by hap_mp4d_open(). Safe to call with NULL.

@@ -1,13 +1,7 @@
-//! bench.zig
-//!
-//! Standalone benchmark harness for the core codec: open/close cost and
-//! per-frame decode cost across the checked-in Hap fixtures. Builds and runs
-//! independently of the Godot extension (`zig build bench`), same as
-//! `zig build test`.
-//!
-//! Methodology: see module-level comments below each measurement function.
-//! Missing fixtures are skipped with a stderr note rather than failing the
-//! run, since not every checkout necessarily has every fixture.
+//! Measure open/close and per-frame decode costs for the checked-in Hap
+//! fixtures. `zig build bench` runs without Godot, as does `zig build test`.
+//! Measurement functions document their methods. Missing fixtures print a
+//! note to stderr and skip the measurement.
 
 const std = @import("std");
 const core = @import("core");
@@ -46,13 +40,9 @@ const Result = struct {
     value: f64,
 };
 
-/// Minimal monotonic-clock stopwatch. Zig 0.16 removed `std.time.Timer` in
-/// favor of routing all timing through an `std.Io` instance; this codebase
-/// deliberately avoids threading `Io` through call sites that don't
-/// otherwise need it (see sync.zig's module docs for the same tradeoff),
-/// so this wraps `clock_gettime(CLOCK.MONOTONIC, ...)` directly instead,
-/// matching mmap_reader.zig's precedent of calling `std.c`/OS primitives
-/// straight through for small, self-contained needs.
+/// Monotonic stopwatch using clock_gettime(.MONOTONIC, ...).
+/// Zig 0.16 removed std.time.Timer; direct OS calls avoid requiring Io at
+/// each call site, as in sync.zig and mmap_reader.zig.
 const Timer = struct {
     last: u64,
 
@@ -116,11 +106,9 @@ fn parseArgs(process_args: std.process.Args) ?[]const u8 {
     return null;
 }
 
-/// The inner thread pool used for chunked-frame decode is a lazy singleton;
-/// its first `instance()` call spawns worker threads. Only chunked frames
-/// dispatch to the pool, so decode one frame of the first available chunked
-/// fixture, untimed, before any measurement so that spin-up cost never
-/// lands inside a timed sample.
+/// Decode a frame from the first available chunked fixture before timing.
+/// This starts the lazy inner-pool singleton's workers outside the samples;
+/// non-chunked frames do not dispatch to the pool.
 fn warmUpThreadPool(allocator: std.mem.Allocator) !void {
     for (chunked_fixtures) |path| {
         var reader = MmapReader.init(path) catch continue;

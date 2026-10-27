@@ -1,26 +1,15 @@
-//! thread_pool.zig
+//! Parallel chunk decode for a single Complex Hap texture. hap_decode.zig
+//! calls InnerThreadPool.instance().execute() with a function to run once
+//! per chunk index. execute() returns after every index completes.
 //!
-//! The "inner" thread pool used for parallel chunk decode of a single
-//! multi-chunk ("Complex" compressor) Hap texture: hap_decode.zig calls
-//! `InnerThreadPool.instance().execute()` directly with a work function to
-//! call once per chunk index, and `execute` returns only once every index
-//! has been dispatched and completed.
+//! All streams share one singleton sized as
+//! max(1, hardware_concurrency - kOuterWorkers). kOuterWorkers comes from
+//! outer_thread_pool.zig's kDefaultWorkers.
 //!
-//! Sizing: max(1, hardware_concurrency - kOuterWorkers), clamped to a
-//! minimum of 1. `kOuterWorkers` is imported from outer_thread_pool.zig's
-//! `kDefaultWorkers`, which owns that constant.
-//!
-//! Singleton: shared by all streams. The outer pool runs up to
-//! kOuterWorkers streams concurrently, so multiple streams' chunked frames
-//! can call execute() at the same time; execute() itself serializes those
-//! calls (dispatch_mutex) so the shared work-batch state is never touched by
-//! two callers at once. This trades chunk-level parallelism across
-//! simultaneously-chunk-decoding streams for correctness -- the thread count
-//! stays bounded either way.
-//!
-//! Mutex/Condition: shared with outer_thread_pool.zig via sync.zig (see
-//! that module's docs for the full Zig-0.16 rationale for wrapping native
-//! OS primitives instead of the removed std.Thread.Mutex/Condition).
+//! Outer-pool workers may call execute() concurrently. dispatch_mutex
+//! serializes these calls to protect shared batch state, so different
+//! streams' chunk batches do not run in parallel. Worker count stays bounded.
+//! Mutex/Condition come from sync.zig; see its Zig 0.16 compatibility notes.
 
 const std = @import("std");
 
@@ -73,10 +62,9 @@ pub const InnerThreadPool = struct {
     p: ?*anyopaque = null,
     remaining: u32 = 0,
 
-    /// Monotonically increasing batch counter. Workers track their last
-    /// seen batch and only proceed when the counter changes, preventing
-    /// re-entry within the same batch. Guarded by `mutex` -- every read and
-    /// write happens with `mutex` held, so this is plain state, not atomic.
+    /// Increasing batch counter. Workers proceed only when it changes,
+    /// preventing re-entry into a batch. Every access holds `mutex`, so the
+    /// counter needs no atomic operations.
     work_batch: u32 = 0,
 
     /// Per-worker partition: index `num_workers` (the last slot) is the
@@ -86,11 +74,9 @@ pub const InnerThreadPool = struct {
     /// Pool lifecycle flag. Guarded by `mutex`.
     running: bool = true,
 
-    /// Create a pool with the given number of worker threads (clamped to a
-    /// minimum of 1). Returns a heap-allocated pool (held by pointer): the
-    /// worker threads capture the pool's address, so it must live at a
-    /// stable location -- callers must call `destroy` exactly once, after
-    /// which the pointer is invalid.
+    /// Create at least one worker and return a heap-allocated pool. Workers
+    /// capture its address, so it must remain stable. Call `destroy` exactly
+    /// once; the pointer is invalid afterward.
     pub fn create(allocator: std.mem.Allocator, requested_workers: u32) !*InnerThreadPool {
         const n = @max(@as(u32, 1), requested_workers);
 

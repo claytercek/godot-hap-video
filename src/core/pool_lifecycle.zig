@@ -1,10 +1,5 @@
-//! pool_lifecycle.zig — boilerplate shared by the two process-wide worker
-//! pools, InnerThreadPool (thread_pool.zig) and OuterThreadPool
-//! (outer_thread_pool.zig): the "stop and join every worker" sequence
-//! their destroy() functions both open with, and the lazily-created,
-//! never-torn-down module-level singleton pattern both expose via
-//! instance(). The pools' actual job-dispatch designs stay separate and
-//! are not touched here.
+//! Shared worker shutdown and lazy process-lifetime singletons for
+//! InnerThreadPool and OuterThreadPool. Each pool handles its own dispatch.
 
 const std = @import("std");
 
@@ -13,16 +8,9 @@ const sync = @import("sync.zig");
 const Mutex = sync.Mutex;
 const Condition = sync.Condition;
 
-/// Signal shutdown and join every thread in `workers`: lock `mutex`, clear
-/// `running`, unlock, wake everything waiting on `cv`, then join.
-///
-/// Callers still deinit `mutex`/`cv` (and any other synchronization
-/// primitives) and free `workers` themselves afterward -- what a pool does
-/// past this point differs enough (e.g. InnerThreadPool has a second
-/// condition variable and a dispatch mutex to deinit and a partitions
-/// slice to free; OuterThreadPool has a stream map to deinit instead) that
-/// folding those steps in here would obscure more than the shared prefix
-/// saves.
+/// Lock `mutex`, clear `running`, unlock, wake all waiters on `cv`, and
+/// join every thread in `workers`. Callers must then deinit synchronization
+/// primitives, free `workers`, and release their pool-specific state.
 pub fn stopAndJoinWorkers(mutex: *Mutex, running: *bool, cv: *Condition, workers: []std.Thread) void {
     mutex.lock();
     running.* = false;
@@ -31,19 +19,11 @@ pub fn stopAndJoinWorkers(mutex: *Mutex, running: *bool, cv: *Condition, workers
     for (workers) |w| w.join();
 }
 
-/// A lazily-created, process-lifetime singleton of `*T`.
-///
-/// `T` must expose `create(std.mem.Allocator, u32) !*T`, which both pools'
-/// create() already matches. `sizeFn` computes the requested worker count;
-/// each pool sizes itself against the hardware differently enough (the
-/// inner pool subtracts the outer pool's worker count, the outer pool
-/// clamps to its own fixed default) that only the surrounding
-/// lock/check-cached/create shape is shared here, not the sizing formula
-/// itself.
-///
-/// The instance is allocated from the page allocator and intentionally
-/// never torn down for the process's lifetime, mirroring what each pool's
-/// own instance() did before this helper existed.
+/// Lazily create a process-lifetime *T using the page allocator; never
+/// destroy it. T must expose `create(std.mem.Allocator, u32) !*T`.
+/// `sizeFn` supplies each pool's worker count: the inner pool subtracts
+/// outer workers from hardware concurrency; the outer pool clamps to its
+/// fixed default.
 pub fn LazySingleton(comptime T: type, comptime sizeFn: fn () u32, comptime panic_msg: []const u8) type {
     return struct {
         var mu: Mutex = .{};

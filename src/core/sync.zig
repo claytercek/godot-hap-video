@@ -1,23 +1,11 @@
-//! sync.zig — shared Mutex/Condition wrapper for real OS-thread
-//! synchronization, used by thread_pool.zig, outer_thread_pool.zig,
-//! frame_queue.zig, and decode_scheduler.zig. Previously duplicated
-//! near-identically inside thread_pool.zig and outer_thread_pool.zig;
-//! extracted here once both pools' need for the same primitive made that
-//! duplication a maintenance hazard.
+//! OS-thread Mutex/Condition wrappers shared by the worker pools,
+//! FrameQueue, and DecodeScheduler. Calls are infallible and need no Io.
 //!
-//! Zig 0.16 note: `std.Thread.Mutex`/`std.Thread.Condition` were removed
-//! upstream with no direct OS-thread-safe replacement in std
-//! (`std.Io.Mutex`/`Io.Condition` require threading an `Io` instance
-//! through every call, and the only zero-setup instance std ships,
-//! `std.Io.Threaded.global_single_threaded`, is documented as not
-//! supporting concurrency at all -- an earlier version of this codebase
-//! backed `Mutex`/`Condition` with it anyway, which produced an
-//! intermittent shutdown race under real cross-thread contention).
-//! `Mutex`/`Condition` below wrap the native OS primitives behind the old
-//! infallible, io-free call shape instead -- POSIX
-//! `pthread_mutex_t`/`pthread_cond_t` (via `std.c`) on macOS/Linux,
-//! SRWLOCK/CONDITION_VARIABLE (via kernel32) on Windows -- which are
-//! genuinely safe for real OS threads.
+//! Zig 0.16 removed std.Thread.Mutex/Condition. std.Io equivalents require
+//! an Io instance; std.Io.Threaded.global_single_threaded does not support
+//! concurrency and previously caused a shutdown race here. Wrap native
+//! pthread_mutex_t/pthread_cond_t through std.c on macOS/Linux, and
+//! SRWLOCK/CONDITION_VARIABLE through kernel32 on Windows.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -127,10 +115,8 @@ const WindowsCondition = struct {
 
 // -- Windows-only extern bindings ------------------------------------------
 //
-// std.os.windows declares the SRWLOCK/CONDITION_VARIABLE types but no
-// longer wraps these kernel32 entry points, so they are declared directly
-// here (same pattern as mmap_reader.zig's file-mapping bindings). Pruned
-// at comptime on non-Windows targets.
+// std.os.windows declares the types but omits these kernel32 entry points.
+// Declare them here; non-Windows targets prune them at comptime.
 
 extern "kernel32" fn AcquireSRWLockExclusive(srw_lock: *windows.SRWLOCK) callconv(.winapi) void;
 extern "kernel32" fn ReleaseSRWLockExclusive(srw_lock: *windows.SRWLOCK) callconv(.winapi) void;

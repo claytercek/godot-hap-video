@@ -1,8 +1,5 @@
-//! hap_video_stream.zig — the HapVideoStream VideoStream resource.
-//!
-//! A VideoStream resource carrying a file path; a stock VideoStreamPlayer
-//! holds one of these and calls _instantiatePlayback() to obtain a
-//! HapVideoStreamPlayback bound to it.
+//! HapVideoStream resource storing a file path. VideoStreamPlayer calls
+//! _instantiatePlayback() to create a HapVideoStreamPlayback for that file.
 
 const HapVideoStream = @This();
 
@@ -36,10 +33,10 @@ allocator: Allocator,
 base: *VideoStream,
 file_path: String = .empty,
 
-/// ClassDB constructor. Godot 4.7's create_instance3 callback requires a
-/// claimed reference; older callbacks require an unclaimed base so the
-/// engine's first Ref/Variant wrapper can claim it without adding an extra
-/// reference. Native callers use createOwned() on either runtime.
+/// ClassDB constructor: Godot 4.7's create_instance3 requires a claimed
+/// reference. Older callbacks leave the initial claim to the engine's first
+/// Ref/Variant wrapper to avoid an extra reference. Native code always uses
+/// createOwned().
 pub fn create(allocator: *Allocator) !*HapVideoStream {
     const self = try allocator.create(HapVideoStream);
     self.* = .{
@@ -84,16 +81,13 @@ pub fn _instantiatePlayback(self: *HapVideoStream) ?*VideoStreamPlayback {
     var file = self.getFile();
     defer file.deinit();
 
-    // The stock VideoStreamPlayer caches playback.getTexture() as soon as
-    // the stream is set and expects a texture with its final size (as with
-    // the engine's synchronous Theora open). Block here until the open
-    // settles and materialize the GPU resources, so the drop-in layer gets
-    // synchronous-open semantics; HapPlayer keeps the async path.
+    // VideoStreamPlayer caches the texture when setting the stream and
+    // needs its final size, as with synchronous Theora open. Wait for open
+    // and GPU setup here; HapPlayer uses the async path.
     if (!pb.open(file) or !pb.waitForOpen() or !pb.pollReady()) {
         var buf: [1024]u8 = undefined;
         log.err("Failed to open: {s}", .{file.toUtf8Buf(&buf)});
-        // pb was never handed to the engine (we're bailing out before
-        // returning it), so we're its sole owner (see ref.zig).
+        // The engine never received pb; release its sole ref (see ref.zig).
         ref.releaseAndDestroy(HapVideoStreamPlayback, pb, &self.allocator);
         return null;
     }

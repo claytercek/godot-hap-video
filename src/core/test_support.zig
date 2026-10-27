@@ -1,15 +1,7 @@
-//! test_support.zig — shared polling/timing helpers, and synthetic Hap
-//! frame builders, for the *_test.zig files that need them
-//! (decode_scheduler_test.zig, concurrency_test.zig, decoder_test.zig,
-//! fuzz_regressions_test.zig). Not a test file itself (no `test` blocks),
-//! so it is not referenced from core.zig's aggregate test block -- it's
-//! imported directly by the files that need it, the same way those files
-//! import decoder.zig/demuxer.zig etc.
-//!
-//! Zig 0.16 note: `waitFor`/`holdsFor` use the same std.Io.Clock-based
-//! sleep/now idiom as sync.zig's Mutex/Condition wrapper (see also the
-//! sibling gdextension-native-media-streams repo's sys_clock.zig, which
-//! documents the same Zig-0.16 rationale for wrapping std.Io here).
+//! Shared polling/timing helpers and synthetic Hap frame builders for core
+//! tests and fuzzers. Test files import this module directly; it has no
+//! test blocks for core.zig to aggregate. waitFor/holdsFor use std.Io.Clock
+//! for timing and sleep on Zig 0.16.
 
 const std = @import("std");
 const testing = std.testing;
@@ -48,11 +40,8 @@ pub fn waitFor(comptime Ctx: type, ctx: Ctx, pred: *const fn (Ctx) bool, timeout
     return true;
 }
 
-/// Poll `pred(ctx)` every ~1ms for `duration_ms`, failing fast the moment
-/// it doesn't hold. Use this in place of "sleep a fixed duration, then
-/// take a single sample" when the assertion is that a condition holds
-/// throughout a window -- a single post-sleep sample can miss a
-/// violation that happened and self-corrected inside the sleep.
+/// Poll `pred(ctx)` every ~1 ms for `duration_ms`; fail on the first false
+/// result. Polling can catch transient violations a post-sleep check misses.
 pub fn holdsFor(comptime Ctx: type, ctx: Ctx, pred: *const fn (Ctx) bool, duration_ms: i64) bool {
     const start = nowMs();
     while (true) {
@@ -96,9 +85,7 @@ extern fn snappy_compress(
 
 extern fn snappy_max_compressed_length(source_length: usize) usize;
 
-// Wire-format constants (from the Hap spec; mirrors hap_decode.zig's
-// private copies -- these are test-only, so duplicating a handful of `u8`
-// constants beats making hap_decode.zig's export them for a single caller).
+// Test-only Hap wire constants, matching hap_decode.zig's private values.
 const compressor_none: u8 = 0xA;
 const compressor_snappy: u8 = 0xB;
 const compressor_complex: u8 = 0xC;
@@ -132,10 +119,8 @@ fn formatNibble(format: hap_frame.HapTextureFormat) u8 {
     };
 }
 
-/// Build a [size24][type] section header wrapping `payload`, using the short
-/// 4-byte header form. Shared by every *_test.zig / *_fuzz.zig file that
-/// needs to hand-build Hap wire bytes (decoder_test.zig, hap_decode.zig's
-/// own inline tests, hap_decode_fuzz.zig's seed frames).
+/// Wrap `payload` in a short 4-byte [size24][type] section header for tests
+/// and fuzz seed frames.
 pub fn buildSection(allocator: std.mem.Allocator, type_byte: u8, payload: []const u8) ![]u8 {
     const out = try allocator.alloc(u8, 4 + payload.len);
     const len: u32 = @intCast(payload.len);
@@ -161,17 +146,11 @@ pub fn buildSectionExt(allocator: std.mem.Allocator, type_byte: u8, payload: []c
     return out;
 }
 
-/// Build a synthetic Complex (chunked) Hap frame carrying `tex_data`, split
-/// into exactly `chunk_count` roughly-equal contiguous chunks (clamped to a
-/// minimum of 1). Each chunk is Snappy-compressed; a chunk whose compressed
-/// form isn't smaller than the original is instead stored uncompressed
-/// (compressor byte 0xA). No offset table is emitted -- chunks are
-/// contiguous in frame-data order, which hap_decode.zig's parser derives on
-/// its own when the offset table is absent.
-///
-/// Unlike the old HapEncode-backed version, the chunk count here never
-/// collapses: the caller always gets back exactly `chunk_count` chunks,
-/// even over incompressible or tiny input.
+/// Build a Complex Hap frame from `tex_data` in exactly `chunk_count`
+/// roughly equal contiguous chunks (minimum 1), even for tiny or
+/// incompressible input. Use Snappy only when it shrinks a chunk; otherwise
+/// store it raw (compressor 0xA). Omit the offset table: hap_decode.zig derives
+/// offsets from sizes for chunks in frame-data order.
 pub fn createChunkedFrame(
     allocator: std.mem.Allocator,
     tex_data: []const u8,
@@ -241,10 +220,8 @@ pub fn createChunkedFrame(
 // -----------------------------------------------------------------------
 // Fixture helpers.
 //
-// Fixture paths are relative to the repo root, which is the test working
-// directory (matches mmap_reader.zig's fixture tests). A missing fixture
-// skips the test rather than failing it, so a stripped checkout still runs
-// the synthetic suites.
+// Fixture paths are repo-root-relative. Missing fixtures skip tests;
+// synthetic tests still run in stripped checkouts.
 // -----------------------------------------------------------------------
 
 /// An open fixture: the mapped file plus the demuxer that parsed it.

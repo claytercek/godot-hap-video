@@ -1,52 +1,29 @@
 #!/usr/bin/env bash
-# Bounded-time local fuzz run against the Demuxer.open() path
-# (src/core/demuxer_fuzz.zig). Since this just runs the core test binary,
-# it also drives decoder.decode()'s bounded loop (src/core/hap_decode_fuzz.zig)
-# for the same HAP_FUZZ_SECONDS window in the same invocation -- one script
-# fuzzes both untrusted-structure entry points.
+# Fuzz Demuxer.open() (src/core/demuxer_fuzz.zig) locally, outside CI.
+# The core test binary also runs decoder.decode()'s bounded loop
+# (src/core/hap_decode_fuzz.zig), each for HAP_FUZZ_SECONDS.
 #
 # Usage: scripts/fuzz_demuxer.sh [seconds]
 #
-# Not run in CI (per-push live fuzzing is out of scope by design); this is
-# local discipline.
+# Try coverage-guided fuzzing (`zig build test --fuzz=<limit>`) first.
+# On Zig 0.17.0 it fails to link: -ffuzz instruments minimp4.c and snappy.cc
+# with Clang's -fsanitize-coverage=trace-cmp calls
+# (__sanitizer_cov_trace_cmp*/_switch/_const_cmp*), but Zig's fuzzer runtime
+# lacks that ABI. Pure-Zig fuzzing links and runs. Keep this attempt so the
+# script uses it when the incompatibility is resolved. See
+# src/core/demuxer_fuzz.zig for details.
 #
-# Two fuzzing paths, tried in order:
+# On failure, run the test binary's "bounded randomized fuzz" test with
+# HAP_FUZZ_SECONDS. This fallback sends random malformed input to Demuxer.open()
+# without coverage feedback.
 #
-#   1. zig's own coverage-guided engine (`zig build test --fuzz=<limit>`).
-#      As of zig 0.17.0 this does NOT link for this project: `-ffuzz`
-#      instruments the vendored C sources (minimp4.c, snappy.cc)
-#      with clang's classic `-fsanitize-coverage=trace-cmp` calls
-#      (__sanitizer_cov_trace_cmp*/_switch/_const_cmp*), and zig's
-#      from-scratch fuzzer runtime doesn't implement that ABI -- only the
-#      pure-Zig coverage path does (verified locally with a minimal
-#      C-source-free repro, which links and fuzzes fine). This step is
-#      kept first anyway so the script starts using it automatically the
-#      day either zig or this project's C dependency drops out of the
-#      picture; see src/core/demuxer_fuzz.zig's module doc comment for the
-#      full writeup.
-#
-#   2. A bounded random-input loop inside the test binary itself, gated by
-#      HAP_FUZZ_SECONDS (src/core/demuxer_fuzz.zig's
-#      "bounded randomized fuzz" test). This is what actually runs today.
-#      It's "dumb" (uncoverage-guided) fuzzing -- no feedback loop steering
-#      generation toward new coverage -- but still throws a large volume
-#      of random malformed input at Demuxer.open() per run.
-#
-# No corpus directory: zig 0.16's `std.testing.fuzz` has no on-disk corpus
-# concept (`FuzzInputOptions.corpus` is a fixed in-binary list -- see
-# demuxer_fuzz.zig -- and a coverage-guided `--fuzz` run keeps its corpus
-# in memory for the life of that single invocation, with no artifact
-# directory à la libFuzzer's corpus/ or crash-*). There is therefore
-# nothing to persist across runs and no directory to gitignore here.
-#
-# No crash artifacts either: on a failure, the child process prints the
-# panic/stack trace to stderr and exits -- there is no libFuzzer-style
-# `crash-<hash>` file written to disk. This script tees output to a log
-# under .zig-cache/ (already gitignored) purely so a long run's output
-# survives scrollback; it is not a corpus or artifact store. Triage a real
-# finding by copying the offending bytes into
-# tests/fixtures/fuzz_regressions/ and letting fuzz_regressions_test.zig
-# replay it forever after.
+# Zig 0.16's std.testing.fuzz has no on-disk corpus: FuzzInputOptions.corpus
+# is an in-binary list, and --fuzz keeps its corpus in memory for one run.
+# Failures print a panic/stack trace to stderr; they write no crash-<hash>
+# files. Nothing persists across runs except this script's log under the
+# gitignored .zig-cache/fuzz-logs/. The log is not a corpus or crash artifact.
+# Copy failing bytes into tests/fixtures/fuzz_regressions/ and add a replay
+# in fuzz_regressions_test.zig.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -55,10 +32,8 @@ LOG_DIR=".zig-cache/fuzz-logs"
 LOG_FILE="$LOG_DIR/$(date +%Y%m%d-%H%M%S).log"
 mkdir -p "$LOG_DIR"
 
-# Rough iteration-count stand-in for a time limit: --fuzz's -Dfuzz=<N> is a
-# run-count limit, not a wall-clock one. This is only reached if step 1
-# above ever starts working; it does not affect step 2's HAP_FUZZ_SECONDS
-# bound.
+# Approximate the duration with --fuzz's run-count limit (-Dfuzz=<N>).
+# This does not change the fallback's HAP_FUZZ_SECONDS time bound.
 FUZZ_LIMIT=$((DURATION * 20000))
 
 echo "Attempting zig's coverage-guided fuzzer (zig build test --fuzz=${FUZZ_LIMIT}) ..." | tee "$LOG_FILE"

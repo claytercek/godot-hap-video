@@ -1,32 +1,16 @@
-//! frame_queue.zig
+//! Bounded SPSC decoded-frame queue: one outer-pool decode worker produces
+//! frames; the render thread consumes them. `init()` takes an explicit
+//! depth; `default_depth` is 4.
 //!
-//! A bounded single-producer/single-consumer queue of decoded frames.
+//! Each slot owns a reusable DecodedFrame. A ReadLease holds the queue lock
+//! during synchronous reads/uploads, preventing seek drains from recycling
+//! a frame in use. The queue retains slot contents; buffer reuse depends
+//! on how the producer decodes into each slot.
 //!
-//! One decode worker (the outer-pool worker currently owning a stream)
-//! pushes; the render thread pops. Depth defaults to 4 (`default_depth`),
-//! per spec.
-//!
-//! Each slot owns a reusable DecodedFrame. A consumer acquires a ReadLease
-//! while it reads or uploads a frame; the lease holds the queue lock so a
-//! concurrent seek drain cannot recycle that slot until the consumer has
-//! finished. DecodedTexture.data buffers are only reallocated when the
-//! producer writes a frame whose size differs from what a slot's buffer already
-//! holds (dimension/variant change) -- ArrayListUnmanaged.resize() is a
-//! no-op on capacity when shrinking or matching, so steady-state playback
-//! never reallocates.
-//!
-//! Internally guarded by a mutex rather than lock-free atomics: decode
-//! times (microseconds-to-milliseconds) dwarf lock overhead, and the SPSC
-//! *usage* contract (one producer thread, one consumer thread) is what
-//! callers must honor -- the mutex only makes violations safe rather than
-//! undefined. The consumer polls (acquireRead/empty) rather than blocking, so
-//! there is no condition variable to wait on.
-//!
-//! `init()` takes `depth` explicitly and `default_depth` is exposed for
-//! callers that want the spec default. Every entry point synchronizes, so all
-//! take a non-const `*FrameQueue`. `Mutex` is imported from sync.zig (see that
-//! module's docs for the Zig-0.16 Mutex/Condition wrapper rationale)
-//! rather than duplicated here.
+//! A mutex from sync.zig guards queue operations; decoding takes far longer
+//! than locking. Callers must still honor the SPSC contract. Consumers poll
+//! acquireRead()/empty(), so no condition variable is needed. Synchronized
+//! entry points take a mutable *FrameQueue.
 
 const std = @import("std");
 
@@ -117,12 +101,9 @@ pub const FrameQueue = struct {
         return self.count == 0;
     }
 
-    /// Producer: get a pointer to the DecodedFrame the caller should
-    /// decode into. Returns null if the queue is full (caller should back
-    /// off; this is the seek/prefetch "queue-behind" boundary, not an
-    /// error). The returned frame's buffers retain their prior capacity --
-    /// decode() implementations that resize() rather than reassign reuse
-    /// it.
+    /// Producer: get the frame to decode into. Return null when full; back
+    /// off at this seek/prefetch queue-behind boundary. Slot buffers retain
+    /// capacity for decoders that resize them instead of reassigning.
     pub fn beginWrite(self: *FrameQueue, frame_index: u32) ?*DecodedFrame {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -153,11 +134,9 @@ pub const FrameQueue = struct {
         return .{ .queue = self, .frame = &slot.frame, .frame_index = slot.frame_index };
     }
 
-    /// Consumer: drop all queued frames (used by seek/scrub to discard
-    /// stale prefetched frames before refilling from the new position).
-    /// Blocks behind any active ReadLease, so a leased frame is never
-    /// recycled while the consumer is still reading it. Does not touch a
-    /// frame the producer may currently be writing via beginWrite().
+    /// Consumer: discard prefetched frames for seek/scrub. Wait for any
+    /// ReadLease before recycling its frame. Leave any frame currently being
+    /// written through beginWrite() untouched.
     pub fn drain(self: *FrameQueue) void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -166,6 +145,4 @@ pub const FrameQueue = struct {
     }
 };
 
-// Tests live in concurrency_test.zig, referenced from core.zig -- see
-// retire_ring.zig's module docs for why this whole family of tests lives
-// in one dedicated file.
+// concurrency_test.zig covers this queue; core.zig imports the tests.

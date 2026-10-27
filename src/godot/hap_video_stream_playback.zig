@@ -1,22 +1,14 @@
-//! hap_video_stream_playback.zig — the HapVideoStreamPlayback position engine.
+//! Godot playback adapter owning async decode and GPU presentation.
+//! PlaybackController controls the clock and playback policy. HapPlayer
+//! lends its controller; the stock VideoStreamPlayer path owns one here.
 //!
-//! Thin Godot adapter over the authoritative core PlaybackController. It owns
-//! the async decode and GPU-present pipelines, but playback clock/policy lives
-//! in the controller. HapPlayer lends its controller to this adapter; the
-//! stock VideoStreamPlayer path asks the adapter to own one itself.
+//! open() queues work on the shared outer pool and returns immediately.
+//! Playback virtuals return defaults until open completes. The stock path
+//! calls waitForOpen() for synchronous setup. destroy() waits for all queued
+//! and running stream jobs, including open, through waitForStreamIdle.
 //!
-//! open() kicks off an asynchronous open on the shared outer pool and
-//! returns immediately; nothing here blocks the main thread. Until the
-//! async open completes, playback virtuals report harmless defaults.
-//!
-//! destroy() blocks (waitForStreamIdle) until any in-flight/queued job for
-//! its stream -- including the open job -- has fully completed.
-//!
-//! Power-user layer (HapPlayer) integration surface: HapPlayer owns this
-//! object directly rather than through a VideoStreamPlayer, so the engine
-//! never calls the virtuals below automatically; HapPlayer drives them from
-//! its own _process() pump instead via the plain (non-virtual-dispatch)
-//! functions below rather than through engine-dispatched virtuals.
+//! HapPlayer owns the adapter directly and calls its plain functions from
+//! _process(); VideoStreamPlayer invokes the engine virtuals.
 
 const HapVideoStreamPlayback = @This();
 
@@ -31,8 +23,7 @@ const RenderingServer = godot.class.RenderingServer;
 const ProjectSettings = godot.class.ProjectSettings;
 const String = godot.builtin.String;
 
-// Core types come through the "core" named module (build.zig-wired) so they
-// match the module instance the rest of the extension hands around.
+// Share build.zig's core module instance with the rest of the extension.
 const core = @import("core");
 const DecodeScheduler = core.decode_scheduler.DecodeScheduler;
 const OpenError = core.decode_scheduler.OpenError;
@@ -52,10 +43,9 @@ const log = std.log.scoped(.hap_video_stream_playback);
 const GpuError = enum { initialize, present };
 
 pub fn register(r: *Registry) void {
-    // Abstract (non-instantiable from GDScript): playback is created only
-    // through the native createOwned()/createBorrowed() paths, which claim
-    // the initial reference. HapVideoStream also supports ClassDB creation
-    // and must adapt its initial reference claim to the Godot version.
+    // Keep playback abstract: only native createOwned()/createBorrowed()
+    // claim its initial reference. HapVideoStream also allows ClassDB
+    // creation and handles that claim according to the Godot version.
     r.addClass(HapVideoStreamPlayback, r.allocator, .{ .is_abstract = true });
 }
 
@@ -122,10 +112,9 @@ pub fn createBorrowed(allocator: *Allocator, controller: *PlaybackController) !*
     const self = try allocator.create(HapVideoStreamPlayback);
     self.* = .{
         .allocator = allocator.*,
-        // Claims RefCounted's initial reference: this is the sole,
-        // internal creation path (the class is abstract, so there is no
-        // GDScript `.new()` to also claim it -- see register()). The engine
-        // adopts this reference when _instantiatePlayback hands it back.
+        // Claim the initial RefCounted reference. The abstract class has
+        // no GDScript .new() path to claim it again. _instantiatePlayback
+        // transfers this reference to the engine.
         .base = .init(),
         .scheduler = scheduler,
         .controller = controller,
@@ -136,12 +125,9 @@ pub fn createBorrowed(allocator: *Allocator, controller: *PlaybackController) !*
 }
 
 pub fn destroy(self: *HapVideoStreamPlayback, allocator: *Allocator) void {
-    // Teardown order is not load-bearing: the scheduler's worker threads
-    // never touch the presenter's GPU resources (decoded frames cross
-    // between them only through the SPSC queue, drained on the main thread),
-    // and the presenter owns its RD/RS resources independently of the
-    // scheduler. Freeing the presenter first is simply grouped for
-    // readability.
+    // Presenter and scheduler teardown are independent. Workers never
+    // touch GPU resources; decoded frames reach the main thread through
+    // the SPSC queue.
     self.gpu_presenter.deinit();
     if (self.audio_staging) |*buffer| buffer.deinit();
     self.scheduler.deinit();
@@ -160,26 +146,22 @@ pub fn rebindController(self: *HapVideoStreamPlayback, controller: *PlaybackCont
 // Open (async)
 // -----------------------------------------------------------------------
 
-/// Begin an asynchronous open of `p_path`. Returns true once the job has
-/// been handed to the outer pool (never blocks). `p_path` is borrowed for
-/// the duration of this call only.
+/// Queue an async open on the outer pool; return true when accepted.
+/// Borrow p_path only for this nonblocking call.
 pub fn open(self: *HapVideoStreamPlayback, p_path: String) bool {
     if (p_path.isEmpty()) {
         log.err("empty path", .{});
         return false;
     }
 
-    // The core demuxer mmaps the file directly, so it needs a real
-    // filesystem path -- res:// and user:// are Godot virtual-filesystem
-    // prefixes FileAccess resolves internally, but mmap() has no idea
-    // about them. Absolute paths pass through globalizePath() unchanged.
+    // mmap() needs a filesystem path. Resolve Godot's res:// and user://
+    // prefixes; globalizePath() leaves absolute paths unchanged.
     var real_path = ProjectSettings.globalizePath(p_path);
     defer real_path.deinit();
     var buf: [4096]u8 = undefined;
     const utf8 = real_path.toUtf8Buf(&buf);
 
-    // openAsync() only hands the mmap+parse job to the outer pool and
-    // returns immediately -- nothing above blocks the main thread.
+    // Queue mmap and parsing without waiting on the main thread.
     self.scheduler.openAsync(utf8) catch return false;
     return true;
 }
@@ -210,15 +192,13 @@ fn initializeAfterOpen(self: *HapVideoStreamPlayback) void {
     self.advance(self.controller.frameRequest(true));
 }
 
-/// Block until the async open settles (ready or failed). Used by the
-/// drop-in layer only: the stock VideoStreamPlayer caches the display
-/// texture when the stream is set and expects it to already have its real
-/// size, so that path needs synchronous-open semantics. HapPlayer never
-/// calls this. Returns whether the open succeeded.
+/// Wait for open to succeed or fail; return true on success. Only the
+/// stock VideoStreamPlayer path waits: it caches the display texture when
+/// setting the stream and needs its final size. HapPlayer stays async.
 ///
-/// The moov parse is milliseconds even for multi-gigabyte files; the bound
-/// only guards against a pathological stall (e.g. a dead network mount),
-/// turning it into a clean open failure instead of hanging the main thread.
+/// moov parsing takes milliseconds even for multi-gigabyte files. The
+/// 30-second polling bound reports failure on stalls such as a dead network
+/// mount; destroy() still waits for the stream job to finish.
 pub fn waitForOpen(self: *HapVideoStreamPlayback) bool {
     const max_wait_ms = 30000;
     var waited: u32 = 0;
@@ -232,19 +212,15 @@ pub fn waitForOpen(self: *HapVideoStreamPlayback) bool {
     return false;
 }
 
-/// Sleep for one millisecond (best-effort; errors are ignored). Zig 0.16
-/// routes blocking sleeps through std.Io rather than a plain
-/// std.Thread.sleep; mirrors src/core/test_support.zig's sleepNs idiom
-/// (that helper is test-only and not exported from core.zig, so this is a
-/// small local duplicate rather than a cross-module reach-in).
+/// Sleep for one millisecond, ignoring errors. Zig 0.16 uses std.Io for
+/// blocking sleeps. Keep this local; core's matching helper is test-only.
 fn sleepOneMs() void {
     const one_ms: std.Io.Clock.Duration = .{ .raw = .fromNanoseconds(std.time.ns_per_ms), .clock = .awake };
     one_ms.sleep(std.Io.Threaded.global_single_threaded.io()) catch {};
 }
 
-/// Poll for async-open + GPU-init completion, running initializeAfterOpen()
-/// the first time it's ready. Safe to call every tick before open
-/// completes; a no-op afterward. Returns isReady().
+/// Initialize GPU resources once open completes, then return isReady().
+/// Safe to poll every tick.
 pub fn pollReady(self: *HapVideoStreamPlayback) bool {
     if (self.scheduler.openStatus() != .open) return false;
     if (!self.playback_initialized and self.gpu_error == null) self.initializeAfterOpen();
@@ -281,9 +257,8 @@ pub fn getError(self: *const HapVideoStreamPlayback) String {
     return String.empty;
 }
 
-/// Render a typed open failure into a display string. UnsupportedHapVariant
-/// is enriched with the offending fourcc the demuxer parked on the track
-/// info before rejecting the file.
+/// Format an open error. For UnsupportedHapVariant, include the fourcc
+/// saved by the demuxer before it rejected the file.
 fn formatOpenError(self: *const HapVideoStreamPlayback, err: OpenError) String {
     return switch (err) {
         error.FileOpenFailed => String.fromLatin1("Failed to open file"),
@@ -343,9 +318,9 @@ fn publishTransport(self: *HapVideoStreamPlayback) void {
     self.transport_snapshot.store(@as(u8, @intFromBool(playing)) | (@as(u8, @intFromBool(paused)) << 1), .release);
 }
 
-/// Main-thread PCM reads, capped at four 4096-frame batches. mixAudio returns
-/// accepted FRAMES, not floats. Keep the cursor on partial acceptance and
-/// abandon stale leftovers after a stall instead of replaying them late.
+/// Read PCM on the main thread in at most four 4096-frame batches.
+/// mixAudio counts accepted frames, not floats. Preserve the unread cursor
+/// after partial acceptance; skip stale PCM after stalls.
 fn feedStockAudio(self: *HapVideoStreamPlayback) void {
     const info = self.audio_info orelse return;
     if (self.audio_mix_failed or !self.controller.audioEnabled()) return;
@@ -358,9 +333,8 @@ fn feedStockAudio(self: *HapVideoStreamPlayback) void {
         const count = self.audio_cursor.count(self.controller.position(), self.duration(), info.sample_rate);
         if (count == 0 or buffer.resize(@intCast(count * 2)) != 0) break;
         const floats: [*]f32 = @ptrCast(buffer.index(0));
-        // A disabled track still feeds silence and lets the stock resampler
-        // consume its bounded queue. Advertising an artificial pause would
-        // freeze old PCM there, replaying it when track 0 is selected again.
+        // Feed silence for a disabled track so the bounded resampler queue
+        // drains. Pausing would retain old PCM until track 0 is selected.
         const read = if (self.audio_track_enabled)
             self.scheduler.readAudio(self.audio_cursor.next_frame, floats[0 .. count * 2])
         else blk: {
@@ -407,16 +381,12 @@ pub fn updateController(self: *HapVideoStreamPlayback, delta: f64) TickResult {
     return tick;
 }
 
-/// Drain the frame queue up to (and including) `target_frame`, presenting
-/// the first frame found at or after it (or, when `forward` is false, at
-/// or before it). Frames on the wrong side of the target are stale
-/// prefetch and are discarded.
+/// Discard prefetch behind the target in the playback direction. Present
+/// only target_frame; retain a frame beyond it for a later request.
 fn presentUpToFrame(self: *HapVideoStreamPlayback, target_frame: u32, forward: bool) void {
     var lease = self.scheduler.queue.acquireRead();
     while (lease != null and (if (forward) lease.?.frame_index < target_frame else lease.?.frame_index > target_frame)) {
-        // Stale prefetch: behind the target when advancing forward, or
-        // ahead of it (i.e. from before a reverse seek caught up) when
-        // advancing backward.
+        // Discard lower indices in forward playback, higher in reverse.
         lease.?.consume();
         _ = self.scheduler.notifyCapacityAvailable();
         lease = self.scheduler.queue.acquireRead();
@@ -431,8 +401,7 @@ fn presentUpToFrame(self: *HapVideoStreamPlayback, target_frame: u32, forward: b
             frame.release();
         }
     }
-    // else: decode hasn't caught up yet -- keep showing the previous frame
-    // rather than blocking; the next update tick will retry.
+    // Keep the previous texture until decode catches up; retry next tick.
 }
 
 // -----------------------------------------------------------------------
@@ -509,11 +478,8 @@ pub fn _setAudioTrack(self: *HapVideoStreamPlayback, p_idx: i32) void {
     self.publishTransport();
 }
 
-/// The presented Texture2D, returned with a SEPARATE +1 reference for the
-/// caller to adopt: the presenter keeps its own persistent reference to
-/// display_texture, so this hands out an independent one that the engine
-/// adopts. Shared implementation behind the _getTexture() engine virtual and
-/// HapPlayer's direct-call surface.
+/// Borrow the presenter's Texture2D for HapPlayer's direct calls.
+/// _getTexture() adds a separate +1 reference for the engine to adopt.
 pub fn texture(self: *HapVideoStreamPlayback) ?*Texture2d {
     if (!self.playback_initialized) return null;
     return .upcast(self.gpu_presenter.getTexture());
@@ -550,11 +516,10 @@ pub fn _update(self: *HapVideoStreamPlayback, p_delta: f64) void {
     self.feedStockAudio();
     const tick = self.updateController(p_delta);
     if (tick.completed and self.audio_info != null and !self.audio_mix_failed) {
-        // The stock player flushes its resampler as soon as isPlaying turns
-        // false. Keep ONLY the atomic transport alive for a bounded tail drain;
-        // the controller still completes normally at the video endpoint.
-        // Wall time, not p_delta: stock speed_scale is folded into p_delta
-        // (including zero), and must never make the drain last indefinitely.
+        // Keep the atomic playing flag true during a bounded audio tail;
+        // otherwise the stock player flushes its resampler. The controller
+        // still completes at the video endpoint. Use wall time because
+        // p_delta includes speed_scale, which can be zero.
         self.audio_drain_deadline_usec = godot.class.Time.getTicksUsec() + @as(u64, @intFromFloat(audio_output.drain_seconds * 1_000_000));
     }
     self.publishTransport();

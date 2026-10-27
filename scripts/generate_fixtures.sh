@@ -61,10 +61,8 @@ echo "Generating hap7 fixture (Hap R / BC7)..."
 if command -v python3 >/dev/null 2>&1; then
   python3 "$(dirname "$0")/generate_hap7_fixture.py" "$OUTDIR/hap7.mov" "$WIDTH" "$HEIGHT"
 else
-  # Unlike the missing-ffmpeg check above, this is a warning, not a hard
-  # exit: Hap7 is best-effort (ffmpeg can't encode it at all, so this is
-  # already the fallback path), and every other fixture format has already
-  # been generated successfully by this point.
+  # Warn without exiting: ffmpeg cannot encode Hap7, but the ffmpeg fixtures
+  # above have already been generated.
   echo "WARNING: python3 not found; skipping hap7.mov generation."
   echo "Run scripts/generate_hap7_fixture.py manually."
 fi

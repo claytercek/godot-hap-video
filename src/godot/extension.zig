@@ -1,20 +1,12 @@
-//! extension.zig -- GDExtension entry point for the HAP video module.
+//! GDExtension entry point. Registers HapVideoStreamPlayback, HapVideoStream,
+//! HapResourceFormatLoader, and HapPlayer. At SCENE initialization, installs
+//! the .mov loader singleton so VideoStreamPlayer can load Hap clips; removes
+//! it at SCENE teardown.
 //!
-//! Registers HapVideoStreamPlayback,
-//! HapVideoStream, HapResourceFormatLoader, and HapPlayer, and -- at the
-//! SCENE initialization level -- adds a HapResourceFormatLoader singleton to
-//! the ResourceLoader (removed at teardown) so a stock VideoStreamPlayer can
-//! load + play a .mov Hap clip.
-//!
-//! Init-level handling: gdzig's entrypoint calls register() once at load,
-//! then registry.enter(level)/exit(level) per initialization level, and
-//! unregister() at final teardown. `.auto` classes commit at the SCENE
-//! level. The loader singleton has no
-//! class seam of its own for per-level setup, so the SCENE enter/exit is
-//! hooked via the Registry's addCallbacks mechanism -- the enter callback
-//! runs AFTER all classes for that level have committed (see
-//! Registry.enter), so the loader class is already registered and
-//! instantiable when the singleton is created.
+//! gdzig calls register() at load, Registry.enter/exit per initialization
+//! level, then unregister() at final teardown. Registry.addCallbacks runs
+//! the loader's SCENE enter hook after .auto classes commit, so its class
+//! exists before the singleton is created.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -49,13 +41,8 @@ pub fn unregister(r: *Registry) void {
     r.removeModule(HapVideoStreamPlayback);
 }
 
-// -----------------------------------------------------------------------
-// LoaderLifecycle — the ResourceFormatLoader singleton's per-level hook.
-//
-// enter/exit fire for every initialization level; this acts only at SCENE.
-// Stored by value in the Registry arena; the
-// enter/exit callbacks receive a stable pointer to that copy.
-// -----------------------------------------------------------------------
+// SCENE-only loader lifecycle. Registry stores this value in its arena and
+// passes callbacks a stable pointer to that copy.
 const LoaderLifecycle = struct {
     allocator: Allocator,
     loader: ?*HapResourceFormatLoader = null,
@@ -71,9 +58,8 @@ const LoaderLifecycle = struct {
         if (level != .scene) return;
         if (self.loader) |loader| {
             ResourceLoader.removeResourceFormatLoader(loader.base);
-            // Drop our create-time ref; the engine dropped its own on
-            // remove (see ref.zig for why this must go through the typed
-            // destroy).
+            // Removal dropped the engine's ref. Release the create-time
+            // ref through typed destroy (see ref.zig).
             ref.releaseAndDestroy(HapResourceFormatLoader, loader, &self.allocator);
             self.loader = null;
         }

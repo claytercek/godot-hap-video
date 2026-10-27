@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """Generate a minimal Hap7 (BC7/BPTC) MOV fixture.
 
-ffmpeg cannot encode Hap7. The Vidvox AVF Batch Exporter (macOS GUI) is the
-canonical source, but it is not scriptable or available in CI. This script
-produces a structurally valid MOV with a Hap7 stsd entry and a real Hap7
-frame (None-compressed BC7 block bytes), which is sufficient to prove the
-highest-risk demux path: minimp4 does not recognize the Hap7 FourCC, so
-dimensions must come from the hand-parsed stsd fallback.
+ffmpeg cannot encode Hap7. The Vidvox AVF Batch Exporter is a macOS GUI
+encoder that cannot be scripted or run in CI. This script writes a MOV
+with a Hap7 stsd entry and None-compressed BC7 bytes. It tests the
+hand-parsed stsd dimension fallback for the Hap7 FourCC, which minimp4
+does not recognize.
 
-The BC7 block bytes are a fixed pattern (mode 6, opaque magenta). They are
-valid BC7 blocks but not meaningful video content. The demuxer and decoder
-treat them as opaque pass-through data, which is exactly what this fixture
-validates.
+The frame repeats a fixed BC7 block rather than meaningful video content.
+The fixture tests opaque pass-through in the demuxer and decoder.
 
 Usage: python3 scripts/generate_hap7_fixture.py [output_path] [width] [height]
 Default output: tests/fixtures/hap7.mov
@@ -167,16 +164,8 @@ def make_stco(offset):
 
 
 def make_bc7_block():
-    """A single valid BC7 block: mode 6, all texels opaque magenta.
-
-    Mode 6 (0x20 leading bit): 1 subset, 4-bit endpoints (A,P), 1-bit
-    per texel interpolation. Simplest valid opaque-color block.
-    """
-    # mode 6: bit pattern 110xxxxx... We use a minimal valid block.
-    # mode 6: 1 bit mode(=0...110 -> 0x06<<3? No, BC7 mode is leading 0s count.
-    # Mode 6 has bit 6 set as leading: 0b110xxxxx = the 3 MSBs.
-    # A simple approach: mode 6, endpoints all 255 (white), all indices 0.
-    # Block: 0x60 | payload. Use a known-good pattern.
+    """Return a fixed BC7 block for a uniform test frame."""
+    # Fixed BC7 pattern for opaque pass-through tests.
     return bytes([
         0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,

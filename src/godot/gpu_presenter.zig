@@ -1,31 +1,23 @@
-//! gpu_presenter.zig — GPU resources for presenting decoded Hap frames.
+//! GPU resources for HapVideoStreamPlayback's decoded frames.
 //!
-//! HapVideoStreamPlayback is the only consumer, through this surface:
-//! init()/deinit, initialize(rd, w, h, variant), cleanup(),
+//! Pass-through variants (Hap1, Hap5, Hap7) upload BC data to RS textures
+//! wrapped in Texture2DRD. HapY and HapM use a compute shader to convert
+//! YCoCg BC textures to RGBA8 and point Texture2DRD at the newest output.
+//!
+//! RetireRing(3) advances all written textures together: pass-through BC
+//! textures, YCoCg BC inputs, and RGBA8 outputs. Each slot waits for two
+//! other publications before reuse. This spacing assumes Godot's default
+//! two-deep render frame queue; it does not track GPU completion. Safe reuse
+//! requires earlier GPU reads to finish before the slot is written again.
+//! Resources are allocated during setup and reused across frames; YCoCg BC
+//! inputs wait for the first frame's format.
+//!
+//! Release transient Rd* RefCounted objects with
+//! `defer ref.releaseEngineRef(x);` immediately after `.init()`. The following
+//! RenderingDevice.*Create call consumes these config objects synchronously.
+//!
+//! API: init()/deinit(), initialize(rd, w, h, variant), cleanup(),
 //! present(&frame), getTexture() -> *Texture2drd, hasAlpha().
-//!
-//! Handles two paths:
-//!   1. Pass-through (Hap1, Hap5, Hap7): upload BC data to an RS texture,
-//!      wrap it in Texture2DRD.
-//!   2. YCoCg decode (HapY, HapM): upload BC data to RD textures, dispatch
-//!      a compute shader that performs YCoCg->RGB, writes to an RGBA8 ring,
-//!      and re-points Texture2DRD to the newest ring slot.
-//!
-//! Every variant rings its GPU-written textures 3 deep (RetireRing(3)),
-//! including the pass-through path and the YCoCg path's BC source textures
-//! -- not just its RGBA8 output. Ring depth 3 is the minimum safe bound
-//! against Godot's default render frame-queue depth of 2: a texture is only
-//! reused for a new write after two other slots have been published in
-//! between, so in-flight GPU reads of an older slot never race a new write.
-//! This closes tearing by construction for every variant.
-//!
-//! RD resources are created once at init (ring_size copies per texture) and
-//! reused across frames.
-//!
-//! RefCounted release pattern: every transient Rd* object obtained via
-//! `.init()` is released with `defer ref.releaseEngineRef(x);` right after
-//! construction, since these are one-shot config objects consumed
-//! synchronously by the `RenderingDevice.*Create` call that follows.
 
 const std = @import("std");
 
@@ -45,10 +37,8 @@ const Variant = godot.builtin.Variant;
 const String = godot.builtin.String;
 const PackedByteArray = godot.builtin.PackedByteArray;
 
-// Core types come through the "core" named module (build.zig-wired) so they
-// match the module instance the rest of the extension hands around. A
-// module's root restricts @import to its own subtree, so a path import into
-// ../core is not an option.
+// Use build.zig's named module to share core types across the extension.
+// A relative ../core import would cross this module's root.
 const core = @import("core");
 const hap_frame = core.hap_frame;
 const retire_ring = core.retire_ring;
@@ -57,37 +47,25 @@ const ref = @import("ref.zig");
 
 const log = std.log.scoped(.hap_gpu_presenter);
 
-/// Number of ring slots. See the module doc comment for the depth-3
-/// rationale (Godot's ~2-deep render frame queue).
+/// Ring depth assuming Godot's default render queue; see the module comment.
 pub const ring_size: usize = 3;
 
 const Ring = retire_ring.RetireRing(ring_size);
 
-/// An empty/invalid RID, comptime-constructible (unlike `Rid.init()`, which
-/// goes through a runtime FFI constructor call and so cannot be a struct
-/// field default).
+/// Invalid RID usable as a comptime field default; Rid.init() requires FFI.
 const rid_invalid: Rid = std.mem.zeroes(Rid);
 
-// YCoCg-DXT5 -> RGBA unpack compute shader (Hap Q / Hap Q Alpha): samples
-// the hardware-decompressed BC3 color texture (plus an optional BC4 alpha
-// texture) and writes the YCoCg->RGB inverse transform to an RGBA8 storage
-// image.
+// Hap Q / Hap Q Alpha shader: convert hardware-decompressed BC3 YCoCg
+// color and optional BC4 alpha to an RGBA8 storage image.
 const ycocg_shader_source = @embedFile("ycocg_unpack.glsl");
 
 // -----------------------------------------------------------------------
 // Format conversion helpers
 // -----------------------------------------------------------------------
 
-/// Godot-side `Image.Format` for a `HapTextureFormat`: the one switch site
-/// that maps core Hap format knowledge onto the Image enum (core itself must
-/// stay free of godot/gdzig imports, so this can't move into hap_frame.zig
-/// alongside the fourcc/variant knowledge it's derived from).
-/// `HapTextureFormat` is exhaustive, so `imageFormat()` needs no fallback
-/// branch.
-///
-/// Resolved once per BC ring (see `createBcTextureRing`) and cached on
-/// `GpuPresenter`, rather than re-switched on every frame's `updateBcTexture`
-/// call.
+/// Map each HapTextureFormat to Image.Format. Keep this exhaustive mapping
+/// here so core stays free of Godot/gdzig imports. createBcTextureRing caches
+/// the result for updateBcTexture instead of resolving it each frame.
 fn imageFormat(fmt: hap_frame.HapTextureFormat) Image.Format {
     return switch (fmt) {
         .rgb_dxt1 => .format_dxt1,
@@ -97,10 +75,8 @@ fn imageFormat(fmt: hap_frame.HapTextureFormat) Image.Format {
     };
 }
 
-/// One ring slot's worth of per-frame-written GPU state. Every field here
-/// is always indexed by the same ring slot as every other field, across
-/// every call site (present(), cleanup(), createUniformSet(), ...) -- they
-/// were previously 8 separate `[ring_size]` arrays indexed in lockstep.
+/// GPU state for one ring slot. All fields use the same slot index during
+/// presentation, uniform setup, and cleanup.
 const RingSlot = struct {
     // RS-level BC textures (pass-through path reuses these directly via
     // Texture2DRD; YCoCg path samples them in the compute shader).
@@ -112,32 +88,25 @@ const RingSlot = struct {
     rd_color_texture: Rid = rid_invalid,
     rd_alpha_texture: Rid = rid_invalid,
 
-    // Compute shader resources (YCoCg only). Pre-created once when the BC
-    // ring is created; the inputs a slot's uniform set binds
-    // (rd_color_texture, rd_alpha_texture, output_texture, sampler) never
-    // change afterward, so there's no need to free/recreate per dispatch.
+    // YCoCg uniform set, created with the BC ring. Its color/alpha RD
+    // textures, output texture, and sampler stay fixed across dispatches.
     uniform_set: Rid = rid_invalid,
 
     // Output texture (RGBA8 storage, YCoCg only).
     output_texture: Rid = rid_invalid,
 
-    // Reusable Image objects (to avoid creating new ones each frame and to
-    // avoid two slots fighting over one Image).
+    // Separate reusable Images prevent slots from sharing mutable state.
     color_image: ?*Image = null,
     alpha_image: ?*Image = null,
 
-    // Reusable staging buffers for updateBcTexture's per-frame upload (to
-    // avoid allocating/freeing a PackedByteArray every texture every frame).
-    // Keyed per-ring-slot rather than shared: by the time a slot is reused,
-    // ring depth 3 guarantees its buffer's COW refcount is back to 1, so
-    // resize() below is a true in-place reuse with no fork.
+    // Reuse per-slot upload buffers. Storage can be reused without a COW
+    // copy once other references are released; ring depth alone does not
+    // guarantee that release before the next upload.
     color_staging: ?PackedByteArray = null,
     alpha_staging: ?PackedByteArray = null,
 };
 
-/// Manages GPU resources for presenting decoded Hap frames. See the module
-/// doc comment for the two variants (pass-through vs. YCoCg) and the
-/// retire-ring rationale.
+/// Present decoded Hap frames through the texture rings described above.
 pub const GpuPresenter = struct {
     rd: ?*RenderingDevice = null,
     initialized: bool = false,
@@ -146,15 +115,11 @@ pub const GpuPresenter = struct {
     width: i32 = 0,
     height: i32 = 0,
 
-    // Single sequencer shared by every per-frame-written resource ring
-    // below: BC source textures (both paths) and the YCoCg output ring
-    // all advance together, once per present() call.
+    // Advance BC inputs and YCoCg outputs together on each successful present().
     ring: Ring = .{},
 
-    // YCoCg-only: the pass-through path creates its BC ring eagerly at
-    // initialize(), but the YCoCg path defers BC ring creation to the first
-    // present() (it needs the first frame's exact alpha-texture format), so
-    // this guards that one-time lazy setup.
+    // Guard lazy YCoCg BC-ring setup: present() needs the first frame's
+    // alpha format. Pass-through creates its BC ring in initialize().
     bc_textures_created: bool = false,
 
     ring_slots: [ring_size]RingSlot = @splat(.{}),
@@ -170,9 +135,8 @@ pub const GpuPresenter = struct {
     shader: Rid = rid_invalid,
     pipeline: Rid = rid_invalid,
 
-    // Stable Texture2DRD presented to the user. Valid (same object) from
-    // construction on -- consumers like the stock VideoStreamPlayer cache
-    // it once, before the async open completes.
+    // Keep this Texture2DRD object stable from construction; consumers may
+    // cache it before async open completes.
     display_texture: *Texture2drd,
 
     pub fn init() GpuPresenter {
@@ -216,13 +180,10 @@ pub const GpuPresenter = struct {
             // Point the stable Texture2DRD at the first output slot
             self.display_texture.setTextureRdRid(self.ring_slots[self.ring.currentSlot()].output_texture);
         } else {
-            // Pass-through path: the frame format is fixed per variant, so
-            // the BC ring can be created now and the display texture
-            // pointed at it. The texture must report its real size from
-            // initialization on: the stock VideoStreamPlayer's first draw
-            // happens before the first decoded frame arrives, and a 0x0
-            // texture at that draw leaves the canvas item without the RS
-            // dependency that triggers later redraws.
+            // Pass-through variants have fixed formats, so create the BC
+            // ring now. VideoStreamPlayer draws before decoding finishes.
+            // It needs the real texture size on that draw: a 0x0 texture
+            // leaves the canvas item without the RS dependency for redraws.
             const fmt = variant.textureFormat() orelse {
                 log.err("pass-through Hap variant has no fixed texture format: {s}", .{@tagName(variant)});
                 return false;
@@ -230,9 +191,7 @@ pub const GpuPresenter = struct {
 
             if (!self.createBcTextureRing(.color, fmt)) return false;
 
-            // createBcTextureRing already extracted, validated, and cached
-            // each slot's RD texture; point the display texture at the
-            // current slot's directly.
+            // createBcTextureRing cached a validated RD texture for each slot.
             self.display_texture.setTextureRdRid(self.ring_slots[self.ring.currentSlot()].rd_color_texture);
         }
 
@@ -244,10 +203,9 @@ pub const GpuPresenter = struct {
     pub fn cleanup(self: *GpuPresenter) void {
         const rd = self.rd orelse return;
 
-        // Free RD resources. Uniform sets must go before the textures they
-        // reference: RD's dependency tracking frees a set automatically
-        // when a contained texture is freed, so the reverse order
-        // double-frees.
+        // Free uniform sets before their textures. RD frees dependent sets
+        // automatically when a texture is freed; reversing this order would
+        // free each set twice.
         for (&self.ring_slots) |*slot| {
             if (slot.uniform_set.isValid()) {
                 rd.freeRid(slot.uniform_set);
@@ -304,8 +262,7 @@ pub const GpuPresenter = struct {
             }
         }
 
-        // Keep the display texture object itself (consumers hold a cached
-        // reference to it); just detach it from the freed GPU resources.
+        // Detach freed GPU resources; consumers retain the display object.
         self.display_texture.setTextureRdRid(rid_invalid);
 
         self.bc_textures_created = false;
@@ -326,9 +283,8 @@ pub const GpuPresenter = struct {
         const tex0 = &frame.textures.items[0];
         if (tex0.data.items.len == 0) return false;
 
-        // Every write this frame targets the ring's writable slot; commit()
-        // publishes it (as the new currentSlot()) only once every resource
-        // has been written, so a partially-updated slot is never presented.
+        // Write every resource into the writable slot. Commit it as
+        // currentSlot() only after all writes succeed.
         const slot = self.ring.writableSlot();
 
         const s = &self.ring_slots[slot];
@@ -346,11 +302,8 @@ pub const GpuPresenter = struct {
                 if (!self.createBcTextureRing(.alpha, alpha_fmt)) return self.rollbackLazyInitialization();
                 self.bc_textures_created = true;
 
-                // The alpha ring is always created above in the YCoCg
-                // path, so every input a uniform set binds
-                // (rd_color_texture, rd_alpha_texture, output_texture,
-                // sampler) already exists for every slot; create all
-                // ring_size uniform sets once instead of per-dispatch.
+                // All inputs, including alpha, now exist in every slot.
+                // Create the fixed uniform sets once for reuse across dispatches.
                 for (0..ring_size) |i| {
                     if (!self.createUniformSet(i)) return self.rollbackLazyInitialization();
                 }
@@ -371,9 +324,7 @@ pub const GpuPresenter = struct {
 
             self.updateBcTexture(s.rs_color_texture, &s.color_image, &s.color_staging, self.color_format, tex0.data.items);
 
-            // createBcTextureRing (run eagerly at initialize()) already cached
-            // this slot's validated RD texture; wrap it directly rather than
-            // re-deriving it from the RS texture every frame.
+            // initialize() cached this slot's validated RD texture.
             self.display_texture.setTextureRdRid(s.rd_color_texture);
         }
 
@@ -395,9 +346,8 @@ pub const GpuPresenter = struct {
     // Private helpers
     // -----------------------------------------------------------------
 
-    /// Lazy YCoCg setup writes several interdependent rings. Roll the whole
-    /// presenter back on any partial failure so a caller can never retry over
-    /// live RIDs that were only partly published.
+    /// Roll back all YCoCg rings on partial setup failure so retries cannot
+    /// reuse partly initialized live RIDs.
     fn rollbackLazyInitialization(self: *GpuPresenter) bool {
         self.cleanup();
         return false;
@@ -428,9 +378,8 @@ pub const GpuPresenter = struct {
     /// writes into.
     const Channel = enum { color, alpha };
 
-    /// Create every ring slot's RS-level BC texture and its RD
-    /// counterpart, and cache the resolved Image.Format for later
-    /// `updateBcTexture` calls on this channel.
+    /// Create RS BC textures and cache their RD RIDs in each slot. Cache
+    /// this channel's Image.Format for updateBcTexture.
     fn createBcTextureRing(self: *GpuPresenter, channel: Channel, fmt: hap_frame.HapTextureFormat) bool {
         const img_fmt = imageFormat(fmt);
         switch (channel) {
@@ -472,9 +421,8 @@ pub const GpuPresenter = struct {
         return true;
     }
 
-    /// Update one ring slot's RS texture with decoded BC data. Reuses a
-    /// persistent per-slot staging `PackedByteArray` instead of allocating a
-    /// fresh one every call: resize() grows/shrinks it in place.
+    /// Upload decoded BC data to one slot's RS texture, resizing its
+    /// persistent staging PackedByteArray as needed.
     fn updateBcTexture(self: *GpuPresenter, rs_tex: Rid, image_slot: *?*Image, staging_slot: *?PackedByteArray, img_fmt: Image.Format, data: []const u8) void {
         if (staging_slot.* == null) staging_slot.* = PackedByteArray.init();
         const img_data = &staging_slot.*.?;
@@ -529,9 +477,7 @@ pub const GpuPresenter = struct {
             return false;
         }
 
-        // Create the compute pipeline
-        // Note: push constant size must be at least 4 bytes (one int)
-        // The pipeline expects a push constant of size 16 (padded).
+        // The push constant holds a 4-byte int in a padded 16-byte block.
         self.pipeline = rd.computePipelineCreate(self.shader, .{});
         if (!self.pipeline.isValid()) {
             log.err("failed to create compute pipeline", .{});
@@ -617,8 +563,7 @@ pub const GpuPresenter = struct {
 
         // Binding 0: color texture.
         appendSamplerUniform(&uniforms, 0, self.sampler, s.rd_color_texture);
-        // Binding 1: alpha texture — always bound, shader checks has_alpha
-        // push constant.
+        // Binding 1: always bind alpha; the shader checks has_alpha.
         appendSamplerUniform(&uniforms, 1, self.sampler, s.rd_alpha_texture);
         // Binding 2: output image (storage image).
         appendImageUniform(&uniforms, 2, s.output_texture);

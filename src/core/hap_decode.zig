@@ -1,25 +1,16 @@
-//! hap_decode.zig
+//! Clean-room Hap parser/decoder based on HapVideoDRAFT.md. Parse section
+//! headers, texture formats, and Complex chunk instructions, then decompress
+//! one texture at a time into the caller's buffer.
 //!
-//! Clean-room Hap frame parser and decoder, implemented from the Hap
-//! bitstream specification (HapVideoDRAFT.md). Parses a single compressed
-//! Hap frame -- its section headers, texture format, and (for the Complex
-//! compressor) its chunk decode-instructions -- and decompresses one
-//! texture at a time into a caller-provided buffer.
+//! Support None (raw copy), Snappy (one block), and Complex (per-chunk
+//! None/Snappy using the shared InnerThreadPool). Accept the five formats in
+//! hap_frame.HapTextureFormat; reject both BC6H nibbles as invalid. Hap HDR
+//! is unsupported here and in the demuxer.
 //!
-//! Three second-stage compressors are handled: None (raw copy), Snappy
-//! (single block), and Complex (per-chunk None/Snappy, decompressed in
-//! parallel via the shared InnerThreadPool). Supported texture formats are
-//! the five with a `hap_frame.HapTextureFormat` tag; the two Hap HDR (BC6H)
-//! format nibbles are rejected as invalid, matching the demuxer's rejection
-//! of HapHDR -- decoding HDR is a stated limitation.
-//!
-//! Deliberate behavior changes from the reference C decoder:
-//!  * A Complex frame whose decode instructions yield a chunk count of zero
-//!    is rejected as an invalid frame. The reference code silently
-//!    "succeeds" producing zero output bytes; we treat that as malformed.
-//!  * Every chunk's compressed span is bounds-checked against the frame
-//!    data before it is read. The reference code trusts the size/offset
-//!    tables and can read out of bounds on a malformed frame.
+//! Unlike the reference C decoder, reject zero-chunk Complex frames instead
+//! of succeeding with empty output. Check each compressed chunk span against
+//! the frame bounds before reading; trusting size/offset tables allows
+//! malformed frames to cause out-of-bounds reads.
 
 const std = @import("std");
 
@@ -238,11 +229,9 @@ fn parseComplexInstructions(payload: []const u8) Error!ComplexInstructions {
         const sub = try readSectionHeader(body[offset..]);
         const data = body[offset + sub.header_len ..][0..sub.size];
 
-        // `@intCast` to u32 below cannot wrap: `sub.size` is bounded by
-        // `readSectionHeader` to fit within the enclosing buffer, which is
-        // ultimately a slice of one MP4 sample (see demuxer.zig/hap_frame.zig
-        // `SampleEntry.size: u32`, sourced from minimp4's 32-bit stsz/stz2
-        // fields) -- so no section can be larger than u32 max to begin with.
+        // readSectionHeader bounds sub.size to one MP4 sample. Its
+        // SampleEntry.size is u32 (from minimp4's stsz/stz2 fields), so the
+        // u32 cast below cannot wrap.
         var section_chunk_count: u32 = 0;
         switch (sub.type) {
             section_chunk_compressor_table => {
@@ -385,11 +374,10 @@ fn decodeComplex(allocator: std.mem.Allocator, payload: []const u8, out: *std.Ar
 // Public single-texture decode.
 // -----------------------------------------------------------------------
 
-/// Decode the texture at `index` into `out`, sized exactly to the decoded
-/// data, and return its format. `out` is resized (its prior contents are
-/// overwritten). On error `out` is left in an unspecified but valid state;
-/// callers that need it emptied on failure must clear it themselves (the
-/// decoder does, via its errdefer).
+/// Decode texture `index` into `out`, resizing it to the exact decoded
+/// length and overwriting prior contents. Return its format. On error,
+/// `out` remains valid but unspecified; callers must clear it if needed
+/// (decoder.zig does this with errdefer).
 pub fn decodeTexture(
     allocator: std.mem.Allocator,
     frame: []const u8,

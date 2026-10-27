@@ -1,29 +1,16 @@
-//! decoder.zig
+//! Decode one Hap frame into raw texture data using the clean-room parser
+//! in hap_decode.zig. HapM carries two textures; each uses its own index,
+//! unlike the reference Unity plugin's hardcoded index 0.
 //!
-//! Decodes a single Hap frame from its compressed bytes into raw texture
-//! data. Delegates parsing and per-texture decompression to hap_decode.zig
-//! (a clean-room Zig implementation of the Hap bitstream), with correct
-//! multi-texture handling (fixing the reference Unity plugin's hardcoded
-//! index=0 bug: HapM frames carry two textures, and each must be decoded
-//! with *its own* index -- looping `i` through decodeTexture below, rather
-//! than hardcoding 0, is that fix).
+//! Multi-chunk Complex textures use the shared InnerThreadPool; see
+//! thread_pool.zig for hardware-based sizing. Single-chunk and non-chunked
+//! textures decode on the calling thread.
 //!
-//! Chunked frames (Complex compressor) are decoded in parallel by
-//! hap_decode via the shared InnerThreadPool (thread_pool.zig), which
-//! auto-derives its thread count from hardware_concurrency per that
-//! module's formula. Single-chunk and non-chunked textures decode inline
-//! on the calling thread.
-//!
-//! The decoder does not copy the caller's input -- it decodes directly from
-//! the slice passed in (typically a slice of the mmap region). Each
-//! texture's output buffer is sized to the exact decoded length up front,
-//! computed by hap_decode during parse.
-//!
-//! `decode` returns `error{InvalidFrame,OutOfMemory}!void`:
-//! `error.InvalidFrame` means the input is not a valid/supported Hap frame,
-//! while `error.OutOfMemory` signals allocation failure -- both leave
-//! `output` empty via a single `errdefer`. Re-decoding into an
-//! already-populated `DecodedFrame` frees its previous textures first.
+//! Input is read directly from the caller's slice, usually an mmap region.
+//! Parsing determines each output buffer's exact decoded length.
+//! `decode` frees any previous output textures before decoding and returns
+//! `error{InvalidFrame,OutOfMemory}!void`. Invalid or unsupported frames and
+//! allocation failures both leave `output` empty through one `errdefer`.
 
 const std = @import("std");
 
@@ -37,31 +24,20 @@ const DecodedFrame = hap_frame.DecodedFrame;
 /// never has more than this many.
 const max_texture_count: u32 = 2;
 
-/// Frees every texture `output` currently holds and resets it to empty,
-/// without touching its outer array's capacity. The sole cleanup primitive
-/// `decode()` uses on every path that leaves `output` non-decoded, so
-/// "empty on failure" stays enforced from one place.
+/// Free all output textures and empty the outer array while retaining its
+/// capacity. All decode cleanup paths use this to keep output empty on error.
 fn clearOutput(output: *DecodedFrame, allocator: std.mem.Allocator) void {
     for (output.textures.items) |*tex| tex.deinit(allocator);
     output.textures.clearRetainingCapacity();
 }
 
-/// Decode a single Hap frame. See module docs for the multi-texture fix and
-/// chunked-decode dispatch through the shared InnerThreadPool.
-///
-/// `input` is the compressed frame data (e.g. a slice of the mmap
-/// region). `output` receives the decoded textures; any textures it
-/// already holds are freed first. On success, `output` holds the newly
-/// decoded textures. Returns `error.InvalidFrame` if `input` is not a
-/// valid/supported Hap frame; on any error, `output` is left empty
-/// (never partially populated from a mid-loop error).
+/// Decode compressed `input` into `output`, freeing any previous textures
+/// first. Return `error.InvalidFrame` for invalid or unsupported input.
+/// Every error, including allocation failure, leaves `output` empty.
 pub fn decode(allocator: std.mem.Allocator, input: []const u8, output: *DecodedFrame) error{ InvalidFrame, OutOfMemory }!void {
     clearOutput(output, allocator);
 
-    // Also empty `output` on error paths (e.g. allocation failure),
-    // not just on rejected frames -- callers shouldn't have to
-    // distinguish "rejected frame" from "ran out of memory" to know
-    // whether output is trustworthy.
+    // Empty output on every error, including allocation and mid-loop failures.
     errdefer clearOutput(output, allocator);
 
     const texture_count = try hap_decode.frameTextureCount(input);
@@ -74,9 +50,8 @@ pub fn decode(allocator: std.mem.Allocator, input: []const u8, output: *DecodedF
 
     var i: u32 = 0;
     while (i < texture_count) : (i += 1) {
-        // Multi-texture fix: decode texture `i`, not a hardcoded 0.
-        // decodeTexture sizes tex.data to the exact decoded length and
-        // returns the parsed texture format.
+        // Use each texture's own index. decodeTexture sizes its buffer
+        // exactly and returns the parsed format.
         const tex = &output.textures.items[i];
         tex.format = try hap_decode.decodeTexture(allocator, input, i, &tex.data);
     }

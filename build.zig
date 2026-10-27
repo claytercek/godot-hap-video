@@ -4,9 +4,8 @@ const gdzig = @import("gdzig");
 
 const common_warn_flags = [_][]const u8{ "-Wall", "-Wextra", "-Wno-unused-parameter" };
 
-// Wires up the vendored C/C++ (minimp4, snappy) that core.zig wraps with
-// hand-written `extern fn` declarations, shared between the shipped core
-// module and the test-only one (see build()'s `core_test_mod`).
+// Add minimp4 and snappy to the shipped and test core modules.
+// core.zig calls them through hand-written `extern fn` declarations.
 fn addCoreCSources(b: *Build, mod: *Build.Module, target: Build.ResolvedTarget) void {
     mod.addIncludePath(b.path("thirdparty/minimp4"));
     mod.addIncludePath(b.path("thirdparty/snappy"));
@@ -20,10 +19,8 @@ fn addCoreCSources(b: *Build, mod: *Build.Module, target: Build.ResolvedTarget) 
         .flags = &common_warn_flags,
     });
 
-    // Snappy has no runtime CPU dispatch: SSSE3/BMI2 decode is purely
-    // compile-time gated, so it must be paired with the matching codegen
-    // flag. Scoped to x86_64 only; aarch64 already gets NEON for free via
-    // __ARM_NEON.
+    // Snappy selects SSSE3/BMI2 at compile time, with no runtime CPU dispatch.
+    // Use matching codegen flags on x86_64; aarch64 enables NEON via __ARM_NEON.
     const snappy_arch_flags: []const []const u8 = switch (target.result.cpu.arch) {
         .x86_64 => &.{ "-mssse3", "-mbmi2" },
         else => &.{},
@@ -52,21 +49,17 @@ pub fn build(b: *Build) !void {
     const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size") orelse .fast;
     const test_optimize = b.option(std.builtin.OptimizeMode, "test-optimize", "Optimization mode for the core test suite") orelse .debug;
     const env_godot = b.graph.environ_map.get("GODOT_PATH");
-    // Upstream ships its binding API/header: only run/smoke need an executable.
-    // Pass a fallback name to keep upstream's configure-time lookup from
-    // requiring Godot for core tests and cross-compilation.
+    // Upstream ships the binding API/header; only run/smoke need Godot.
+    // A fallback name bypasses configure-time lookup for tests and cross-builds.
     const godot_path = b.option([]const u8, "godot-path", "Path to a Godot executable (run/smoke only)") orelse
         env_godot orelse b.findProgram(.{ .names = &.{"godot"} }) orelse "godot";
 
-    // Sanitizer knobs for the core test suite only (see
-    // .github/workflows/sanitizers.yml for what's actually wired into CI,
-    // and that file's header comment for what Zig 0.17 does and doesn't
-    // support here). Not applied to the Godot extension build.
+    // Apply sanitizers only to core tests, never the extension.
+    // See .github/workflows/sanitizers.yml for CI lanes and their limits.
     const tsan = b.option(bool, "tsan", "Enable ThreadSanitizer on the core test build") orelse false;
     const sanitize_c = b.option(std.zig.SanitizeC, "sanitize-c", "UBSan mode for the core test build's C sources (off/trap/full)") orelse .off;
 
-    // --- Core: pure Zig plus the vendored C libraries (hap, snappy,
-    // minimp4) it wraps with hand-written `extern fn` declarations. ---
+    // Core: Zig with vendored hap, snappy, and minimp4 via `extern fn`.
     const core_mod = b.createModule(.{
         .root_source_file = b.path("src/core/core.zig"),
         .target = target,
@@ -76,10 +69,8 @@ pub fn build(b: *Build) !void {
 
     addCoreCSources(b, core_mod, target);
 
-    // The test suite has its own optimization mode so extension builds can
-    // stay fast while ordinary tests default to runtime-safe debug.
-    // Local fuzzing can opt into fast without silently changing the
-    // extension build through -Dtest-optimize=fast.
+    // Tests default to runtime-safe debug independently of extension builds.
+    // Local fuzzing can use -Dtest-optimize=fast without changing the extension.
     const core_test_mod = b.createModule(.{
         .root_source_file = b.path("src/core/core.zig"),
         .target = target,
@@ -94,9 +85,8 @@ pub fn build(b: *Build) !void {
     const test_step = b.step("test", "Run core unit tests (no Godot needed)");
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
 
-    // --- Bench: standalone open/close/decode benchmark, no Godot needed.
-    // Reuses core_mod (not core_test_mod) so numbers reflect the same
-    // fast build that ships in the extension. ---
+    // Benchmark open/close/decode without Godot, using the shipped core_mod
+    // optimization mode rather than core_test_mod.
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("src/bench/bench.zig"),
         .target = target,

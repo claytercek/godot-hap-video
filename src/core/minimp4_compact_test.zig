@@ -1,5 +1,5 @@
-//! Standalone compact-index/shim tests. No Godot or demuxer dependency.
-//! Also imported by core.zig's test block.
+//! Test the compact index and C shim without Godot or the demuxer.
+//! Run standalone or through core.zig's test block.
 const std = @import("std");
 const testing = std.testing;
 

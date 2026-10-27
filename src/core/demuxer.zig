@@ -1,26 +1,16 @@
-//! demuxer.zig
+//! Demux Hap MOV files using minimp4 for box traversal and sample tables.
+//! Parse `stsd` directly for Hap FourCCs and dimensions because minimp4's
+//! allowlist excludes Hap. Classifying tracks by FourCC instead of
+//! handler_type avoids minimp4's dual-hdlr bug.
 //!
-//! Demuxer for Hap-encoded MOV files. Uses minimp4 (via the hand-written C
-//! shim in minimp4_shim.h/.c) for basic MOV box walking and sample-table
-//! bookkeeping, and hand-parses the `stsd` box itself to extract Hap FourCCs
-//! and dimensions -- minimp4's FourCC allowlist doesn't recognize Hap
-//! codecs. Tracks are classified by stsd FourCC, not handler_type, to
-//! sidestep minimp4's dual-hdlr bug.
+//! Validate and cache video offsets and sizes at open for O(1) random access
+//! and SIGBUS mitigation. Embedded PCM owns a separate compact chunk index;
+//! unsupported audio produces a warning without failing video open.
 //!
-//! All video frame offsets/sizes are validated and cached at open time for
-//! O(1) random access and SIGBUS mitigation. Optional embedded PCM uses an
-//! independently owned compact chunk index; unsupported audio is a warning,
-//! not a video-open error.
-//!
-//! Interop note: minimp4's MP4D_demux_t/MP4D_track_t structs are large and
-//! their layout depends on build-time switches (MINIMP4_ALLOW_64BIT,
-//! MP4D_INFO_SUPPORTED, MP4D_TIMESTAMPS_SUPPORTED, ...). Rather than mirror
-//! them field-for-field in Zig (fragile -- a single mismatched offset would
-//! silently corrupt reads), this module talks to minimp4 exclusively through
-//! the small hand-written C shim (minimp4_shim.h/.c), which exposes only
-//! scalar accessors. This matches the shim-interop convention used
-//! elsewhere for non-trivial C APIs (see the AVFoundation backend in the
-//! sibling gdextension-native-media-streams repo).
+//! minimp4_shim.h/.c exposes scalar accessors instead of mirroring
+//! MP4D_demux_t/MP4D_track_t in Zig. Their layouts depend on switches such as
+//! MINIMP4_ALLOW_64BIT, MP4D_INFO_SUPPORTED, and MP4D_TIMESTAMPS_SUPPORTED;
+//! a mismatched field offset would silently corrupt reads.
 
 const std = @import("std");
 
@@ -160,11 +150,9 @@ fn findStsdInTrak(file_data: []const u8, trak: BoxHeader) ?BoxHeader {
     return current;
 }
 
-/// Precise failure modes of Demuxer.open(). Each tag names the specific
-/// check that rejected the file; the human-readable message is formatted at
-/// the display edge (see the Godot playback layer), which lets a caller
-/// special-case UnsupportedHapVariant against the offending fourcc parked on
-/// `Demuxer.track.fourcc`.
+/// Demuxer.open() failures. The Godot playback layer formats messages from
+/// these tags; UnsupportedHapVariant leaves the offending FourCC in
+/// `Demuxer.track.fourcc` for callers to inspect.
 pub const OpenError = error{
     /// minimp4 could not parse the file as an MP4/MOV container at all.
     MalformedMp4,
@@ -273,11 +261,9 @@ pub const Demuxer = struct {
         return .no_match;
     }
 
-    /// Validate all sample offsets/sizes against the file size. Static and
-    /// public so it can be tested with synthetic offsets (including >4 GB
-    /// ones) without needing a real multi-gigabyte fixture. All arithmetic
-    /// is 64-bit so a sample straddling the 4 GB boundary can't wrap into a
-    /// spuriously in-range value.
+    /// Validate sample offsets and sizes with 64-bit arithmetic, preventing
+    /// wraparound at 4 GB. Public and static for synthetic large-offset tests
+    /// that need no multi-gigabyte fixture.
     pub fn validateSamples(samples: []const SampleEntry, file_size: u64) error{SamplesExceedFileSize}!void {
         for (samples) |sample| {
             // sample.offset/size come from minimp4's parse of attacker-
@@ -356,11 +342,9 @@ pub const Demuxer = struct {
 
         if (num_samples == 0) return error.ZeroSamples;
 
-        // A file can't legitimately contain more samples than it has bytes,
-        // so this also catches minimp4's stsz sample_count (bounded only to
-        // a generous 256MB/4-byte-entries ceiling) before it drives a
-        // reserve() far bigger than the file it came from -- fuzzer found a
-        // ~1GB allocation from a small crafted file.
+        // Bound samples by file bytes before reserve(). minimp4's stsz limit
+        // (256 MB of 4-byte entries) allowed a small crafted file to trigger
+        // a ~1 GB allocation during fuzzing.
         if (@as(u64, num_samples) > file_size) return error.TooManySamples;
 
         // Cache all sample offsets/sizes, capturing the first sample's
