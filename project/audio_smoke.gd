@@ -655,24 +655,34 @@ func _wait_audio_seconds(seconds: float) -> void:
 		await get_tree().process_frame
 
 
-func _stats(read_delay_msec: int = 0) -> Dictionary:
+func _stats(label: String, read_delay_msec: int = 0) -> Dictionary:
 	_capture.clear_buffer()
 	var begin := Time.get_ticks_usec()
 	var frames := ceili(AudioServer.get_mix_rate() * CAPTURE_WINDOW_SECONDS)
 	var deadline := Time.get_ticks_msec() + 1500
+	var available := _capture.get_frames_available()
+	var first_progress_ms := -1.0
+	var last_progress := begin
 	# Read exactly the oldest 120 ms at the mix rate, independent of source rate.
 	# A SceneTree timer can resume late; reading the full queue could include a
 	# second of PCM plus starvation silence, skewing RMS and zero-crossing rates.
-	while _capture.get_frames_available() < frames and Time.get_ticks_msec() < deadline:
+	while available < frames and Time.get_ticks_msec() < deadline:
 		await get_tree().process_frame
-	if _capture.get_frames_available() < frames:
-		_fail("capture window timed out: need=%d available=%d elapsed_ms=%f" % [frames, _capture.get_frames_available(), (Time.get_ticks_usec() - begin) / 1000.0])
+		var current := _capture.get_frames_available()
+		if current > available:
+			last_progress = Time.get_ticks_usec()
+			if first_progress_ms < 0.0:
+				first_progress_ms = (last_progress - begin) / 1000.0
+		available = current
+	if available < frames:
+		var now := Time.get_ticks_usec()
+		_fail("%s: capture window timed out: need=%d available=%d elapsed_ms=%.1f first_progress_ms=%.1f stalled_ms=%.1f driver=%s mix_rate=%d" % [label, frames, available, (now - begin) / 1000.0, first_progress_ms, (now - last_progress) / 1000.0, AudioServer.get_driver_name(), AudioServer.get_mix_rate()])
 		return _analyze(PackedVector2Array())
 	if read_delay_msec > 0:
 		OS.delay_msec(read_delay_msec)
 	var queued_frames := _capture.get_frames_available()
 	if read_delay_msec > 0 and queued_frames < frames * 4:
-		_fail("delayed-read regression did not create an oversized capture queue: window=%d queued=%d" % [frames, queued_frames])
+		_fail("%s: delayed-read regression did not create an oversized capture queue: window=%d queued=%d" % [label, frames, queued_frames])
 		return _analyze(PackedVector2Array())
 	var data := _capture.get_buffer(frames)
 	# Later frames are outside this measurement, not part of its denominator.
@@ -707,14 +717,14 @@ func _analyze(data: PackedVector2Array) -> Dictionary:
 	}
 
 
-func _sample() -> Vector2:
-	var stats := await _stats()
+func _sample(label: String) -> Vector2:
+	var stats := await _stats(label)
 	var rms: Vector2 = stats.rms
 	return Vector2(stats.frames, sqrt(rms.length_squared() / 2.0))
 
 
 func _mono(label: String) -> bool:
-	var stats := await _stats()
+	var stats := await _stats(label)
 	if stats.frames < 256 or stats.rms.x < 0.001 or stats.difference > 0.000001:
 		_fail("%s: mono channels differ or are silent: %s" % [label, stats])
 		return false
@@ -725,7 +735,7 @@ func _pattern(label: String, late: bool, read_delay_msec: int = 0) -> bool:
 	# Drain old server/device data before judging seek/loop content. Both
 	# channels retain tones, with dominance AND frequency changing at 1 second.
 	await _wait_audio_seconds(0.15)
-	var stats := await _stats(read_delay_msec)
+	var stats := await _stats(label, read_delay_msec)
 	return _check_pattern(label, late, stats)
 
 
@@ -745,7 +755,7 @@ func _check_pattern(label: String, late: bool, stats: Dictionary) -> bool:
 
 
 func _audible(label: String) -> bool:
-	var sample := await _sample()
+	var sample := await _sample(label)
 	if sample.x < 256 or sample.y < 0.001:
 		_fail("%s: insufficient captured PCM frames=%d RMS=%f" % [label, int(sample.x), sample.y])
 		return false
@@ -755,7 +765,7 @@ func _audible(label: String) -> bool:
 func _silent(label: String) -> bool:
 	# Discard bounded server/device tail before measuring a control transition.
 	await _wait_audio_seconds(0.15)
-	var sample := await _sample()
+	var sample := await _sample(label)
 	if sample.y > 0.0001:
 		_fail("%s: stale audio RMS=%f" % [label, sample.y])
 		return false

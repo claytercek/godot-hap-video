@@ -103,7 +103,12 @@ jobs:
             } > ci-logs/pulse-state.log 2>&1
           }
           trap pulse_diagnostics EXIT
-          pulseaudio --start --exit-idle-time=-1 --log-target="file:$PWD/ci-logs/pulseaudio.log"
+          # Use only the native protocol and the test sink, not default.pa's
+          # device discovery or idle-suspend policy. --exit-idle-time alone
+          # keeps the daemon alive but does not prevent sink suspension while
+          # the preceding video smoke uses Dummy audio.
+          pulseaudio --start --exit-idle-time=-1 -n --load=module-native-protocol-unix \
+            --log-target="file:$PWD/ci-logs/pulseaudio.log"
           ready=false
           for _ in {1..50}; do
             if pactl info > ci-logs/pulse-readiness.log 2>&1; then

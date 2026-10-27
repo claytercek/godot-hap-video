@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import shlex
 import tempfile
 import unittest
 from unittest import mock
@@ -65,6 +66,21 @@ class LogTests(unittest.TestCase):
         self.assertTrue(check_log(self.log().replace("Forward+", "Compatibility"), "video", "default"))
         self.assertTrue(check_log(self.log(), "video", "vulkan"))
         self.assertTrue(check_log(self.log("audio") + "Using audio driver Dummy\n", "audio", "default"))
+
+
+class PulseConfigTests(unittest.TestCase):
+    def test_ci_daemon_does_not_load_host_idle_suspend_policy(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/test.yml").read_text()
+        # Join shell continuations before inspecting the actual startup command.
+        commands = workflow.replace("\\\n", " ").splitlines()
+        startup = next(shlex.split(line.strip()) for line in commands
+                       if line.strip().startswith("pulseaudio --start "))
+        # Keeping the daemon alive alone does not keep its sinks awake.
+        self.assertIn("--exit-idle-time=-1", startup)
+        self.assertIn("-n", startup, "default.pa can load module-suspend-on-idle")
+        self.assertEqual(["--load=module-native-protocol-unix"],
+                         [arg for arg in startup if arg.startswith("--load=")])
+        self.assertFalse(any(arg == "-F" or arg.startswith("--file") for arg in startup))
 
 
 class RunnerTests(unittest.TestCase):
