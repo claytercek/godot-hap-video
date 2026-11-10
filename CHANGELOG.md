@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.0](https://github.com/claytercek/godot-hap-video/compare/v0.4.0...v0.5.0) (2026-11-10)
+
+### Changed
+* Update the gdzig dependency to commit 665e8fa (extension Registry, method, slot, and entrypoint API changes). Zig stays at 0.17.0, which both the project and gdzig still require.
+
 ## [0.4.0](https://github.com/claytercek/godot-hap-video/compare/v0.3.0...v0.4.0) (2026-10-21)
 
 ### Added
