@@ -54,13 +54,15 @@ pub fn holdsFor(comptime Ctx: type, ctx: Ctx, pred: *const fn (Ctx) bool, durati
 
 pub const requireFixture = @import("fixture_data.zig").require;
 
+pub const regression_dir = "tests/fixtures/fuzz_regressions";
+
 pub const regression_paths = [_][]const u8{
-    "tests/fixtures/fuzz_regressions/crash_0c3b48b5_ts_overflow.bin",
-    "tests/fixtures/fuzz_regressions/crash_36735b5f.bin",
-    "tests/fixtures/fuzz_regressions/crash_783ca462.bin",
-    "tests/fixtures/fuzz_regressions/crash_85883b19.bin",
-    "tests/fixtures/fuzz_regressions/leak_9b88d453.bin",
-    "tests/fixtures/fuzz_regressions/oom_9c36f721.bin",
+    regression_dir ++ "/crash_0c3b48b5_ts_overflow.bin",
+    regression_dir ++ "/crash_36735b5f.bin",
+    regression_dir ++ "/crash_783ca462.bin",
+    regression_dir ++ "/crash_85883b19.bin",
+    regression_dir ++ "/leak_9b88d453.bin",
+    regression_dir ++ "/oom_9c36f721.bin",
 };
 
 // -----------------------------------------------------------------------

@@ -111,6 +111,11 @@ jobs:
             cat ci-logs/pulse-readiness.log
             exit 1
           fi
+          pactl list short modules > ci-logs/pulse-modules.log
+          if grep -E '^[0-9]+[[:space:]]+module-suspend-on-idle([[:space:]]|$)' ci-logs/pulse-modules.log; then
+            echo 'PCM smoke requires a sink that stays awake during video smoke' >&2
+            exit 1
+          fi
           pactl load-module module-null-sink sink_name=hap_smoke rate=48000 channels=2 channel_map=front-left,front-right
           pactl set-default-sink hap_smoke
           pactl set-default-source hap_smoke.monitor

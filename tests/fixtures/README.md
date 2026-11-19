@@ -41,4 +41,25 @@ playing; the payload is not AAC.
 ## Regression inputs
 
 `fuzz_regressions/` holds malformed binary inputs for exact replay by the
-core tests. Keep their original bytes, even when media tools reject them.
+core tests. Save new inputs as `.bin` and add them to `regression_paths` in
+[`test_support.zig`](../../src/core/test_support.zig). Keep their original
+bytes, even when media tools reject them.
+
+## Replacing media
+
+The [original fixture recipes](https://github.com/claytercek/godot-hap-video/tree/50c026ed39076a075f93de9f722c0127dcb93c2f/scripts)
+are available for maintainers. Run them in a scratch checkout, then copy
+only the intended replacements into this one. The historical FFmpeg script
+specifies four seconds; use two seconds to match the committed clips.
+
+- For Hap1, Hap5, or HapY, update the chunked counterpart and the frame-zero
+  still. For Hap1, also update `project/hap1.mov` and the raw BC1 golden.
+- `generate_hap7_fixture.py` writes the BC7 clip. `generate_hapm_fixture.py`
+  writes the dual-texture clip and both goldens together.
+- If `hap1_audio.mov` changes, run `generate_pcm_fixtures.py` in the scratch
+  checkout with the replacement source. Its `--check` option compares both
+  stereo fixtures with the expected bytes without writing.
+
+Run `zig build test` for the decode and golden checks, then `zig build smoke`
+for presentation and audio playback. Use `git lfs fsck` after committing to
+verify the pointers and stored objects.

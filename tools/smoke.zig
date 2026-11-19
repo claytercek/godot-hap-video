@@ -14,7 +14,9 @@ const usage =
     \\             [--audio [--audio-driver DRIVER]] [--log-dir DIR]
     \\             [--timeout SECONDS] [-- --display-driver x11]
     \\Run from the repository root against the installed project extension.
-    \\Godot defaults to GODOT_PATH or godot; logs default to .zig-cache/smoke.
+    \\Godot defaults to GODOT_PATH or godot.
+    \\Each run gets its own directory under .zig-cache/smoke by default.
+    \\Use an explicit --log-dir for only one invocation at a time.
     \\
 ;
 
@@ -23,7 +25,7 @@ const Options = struct {
     driver: Driver = .default,
     audio: bool = false,
     audio_driver: ?[]const u8 = null,
-    log_dir: []const u8 = ".zig-cache/smoke",
+    log_dir: ?[]const u8 = null,
     timeout: Io.Duration = .fromSeconds(120),
     x11: bool = false,
 
@@ -112,12 +114,33 @@ fn run(init: std.process.Init) !u8 {
         return 1;
     };
     if (manifest.kind != .file) return error.InvalidExtensionManifest;
-    try cwd.createDirPath(io, options.log_dir);
-    const logs = try cwd.openDir(io, options.log_dir, .{});
+    var path_buffer: [default_log_root.len + 1 + 32]u8 = undefined;
+    const path = if (options.log_dir) |path| explicit: {
+        try cwd.createDirPath(io, path);
+        break :explicit path;
+    } else try createLogDir(io, cwd, default_log_root, &path_buffer);
+    std.debug.print("SMOKE_LOG_DIR {s}\n", .{path});
+    const logs = try cwd.openDir(io, path, .{});
     defer logs.close(io);
     if (!try runScene(gpa, io, logs, options, .video)) return 1;
     if (options.audio and !try runScene(gpa, io, logs, options, .audio)) return 1;
     return 0;
+}
+
+const default_log_root = ".zig-cache/smoke";
+
+fn createLogDir(io: Io, cwd: Dir, root: []const u8, buffer: []u8) ![]const u8 {
+    try cwd.createDirPath(io, root);
+    while (true) {
+        var nonce: [16]u8 = undefined;
+        io.random(&nonce);
+        const path = try std.fmt.bufPrint(buffer, "{s}/{x}", .{ root, &nonce });
+        cwd.createDir(io, path, .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => return err,
+        };
+        return path;
+    }
 }
 
 fn runScene(gpa: Allocator, io: Io, logs: Dir, options: Options, scene: Scene) !bool {
@@ -137,25 +160,66 @@ fn runScene(gpa: Allocator, io: Io, logs: Dir, options: Options, scene: Scene) !
     } else if (!outcome.term.success()) {
         std.debug.print("SMOKE_FAIL: {s}: {f}\n", .{ name, outcome.term });
     }
-    const text = try readLogs(gpa, io, logs, name, stderr_name);
-    defer gpa.free(text);
-    try Io.File.stdout().writeStreamingAll(io, text);
-    var buf: [4096]u8 = undefined;
-    var stderr = Io.File.stderr().writerStreaming(io, &buf);
-    const valid = try validate(text, scene, options.driver, options.audio_driver, &stderr.interface);
+    var out_buf: [8192]u8 = undefined;
+    var err_buf: [4096]u8 = undefined;
+    var stdout = Io.File.stdout().writerStreaming(io, &out_buf);
+    var stderr = Io.File.stderr().writerStreaming(io, &err_buf);
+    var validation: Validation = .{ .scene = scene, .driver = options.driver, .requested_audio = options.audio_driver };
+    const valid = try inspectLogs(gpa, io, logs, name, stderr_name, &validation, &stdout.interface, &stderr.interface);
     try stderr.interface.flush();
     return valid and outcome.term.success() and !outcome.timed_out;
 }
 
-fn readLogs(gpa: Allocator, io: Io, logs: Dir, name: []const u8, stderr_name: ?[]const u8) ![]u8 {
-    const limit: Io.Limit = .limited(8 * 1024 * 1024);
-    const output = try logs.readFileAlloc(io, name, gpa, limit);
-    const separate = stderr_name orelse return output;
-    defer gpa.free(output);
-    const errors = try logs.readFileAlloc(io, separate, gpa, limit);
-    defer gpa.free(errors);
-    // A missing final newline on either stream must not hide a signature.
-    return std.mem.join(gpa, "\n", &.{ output, errors });
+fn inspectLogs(gpa: Allocator, io: Io, logs: Dir, name: []const u8, stderr_name: ?[]const u8, validation: *Validation, replay: *Io.Writer, diagnostics: *Io.Writer) !bool {
+    const names = [_]?[]const u8{ name, stderr_name };
+    // A 4.6 banner on either stream can allow probes earlier in the output.
+    for (names, 0..) |maybe_name, i| {
+        const file_name = maybe_name orelse continue;
+        if (i != 0) try replay.writeByte('\n');
+        try inspectLog(gpa, io, logs, file_name, validation, .replay, replay);
+    }
+    try replay.flush();
+    for (names) |maybe_name| {
+        const file_name = maybe_name orelse continue;
+        try inspectLog(gpa, io, logs, file_name, validation, .validate, diagnostics);
+    }
+    return validation.finish(diagnostics);
+}
+
+fn inspectLog(gpa: Allocator, io: Io, logs: Dir, name: []const u8, validation: *Validation, pass: enum { replay, validate }, w: *Io.Writer) !void {
+    const file = try logs.openFile(io, name, .{});
+    defer file.close(io);
+    var buf: [8192]u8 = undefined;
+    var reader = file.reader(io, &buf);
+    const r = &reader.interface;
+    var long_line: Io.Writer.Allocating = .init(gpa);
+    defer long_line.deinit();
+    while (true) {
+        const raw = r.takeDelimiterInclusive('\n') catch |err| switch (err) {
+            error.ReadFailed => return reader.err.?,
+            error.EndOfStream => if (r.buffered().len == 0) break else r.take(r.buffered().len) catch unreachable,
+            error.StreamTooLong => blk: {
+                long_line.clearRetainingCapacity();
+                _ = r.streamDelimiterEnding(&long_line.writer, '\n') catch |stream_err| switch (stream_err) {
+                    error.ReadFailed => return reader.err.?,
+                    error.WriteFailed => return error.OutOfMemory,
+                };
+                if (r.buffered().len != 0) {
+                    r.toss(1);
+                    long_line.writer.writeByte('\n') catch return error.OutOfMemory;
+                }
+                break :blk long_line.written();
+            },
+        };
+        const line = if (std.mem.endsWith(u8, raw, "\n")) raw[0 .. raw.len - 1] else raw;
+        switch (pass) {
+            .replay => {
+                try w.writeAll(raw);
+                validation.noteVersion(line);
+            },
+            .validate => try validation.checkLine(line, w),
+        }
+    }
 }
 
 const Outcome = struct { term: std.process.Child.Term, timed_out: bool };
@@ -172,12 +236,13 @@ fn capture(io: Io, logs: Dir, name: []const u8, stderr_name: ?[]const u8, argv: 
         .stdout = .{ .file = output },
         .stderr = .{ .file = errors },
         .pgid = if (windows) null else 0,
+        .start_suspended = windows,
     }) catch |err| {
         std.debug.print("Cannot launch {s}: {t}\n", .{ argv[0], err });
         return err;
     };
+    if (windows) return Windows.run(child, timeout);
     defer child.kill(io);
-    if (windows) return waitWindows(io, &child, timeout);
     const deadline = Io.Clock.Timestamp.now(io, .awake).addDuration(.{ .clock = .awake, .raw = timeout });
     const pid = child.id.?;
     const posix = std.posix;
@@ -208,32 +273,47 @@ fn capture(io: Io, logs: Dir, name: []const u8, stderr_name: ?[]const u8, argv: 
     }
 }
 
-fn waitWindows(io: Io, child: *std.process.Child, timeout: Io.Duration) !Outcome {
+const Windows = struct {
     const win = std.os.windows;
-    const ticks: i64 = @intCast(-@divFloor(timeout.nanoseconds + 99, 100));
-    const waited = win.ntdll.NtWaitForSingleObject(child.id.?, .FALSE, &ticks);
-    var info: win.PROCESS.BASIC_INFORMATION = undefined;
-    const status = win.ntdll.NtQueryInformationProcess(child.id.?, .BasicInformation, &info, @sizeOf(@TypeOf(info)), null);
-    if (status != .SUCCESS) return win.unexpectedStatus(status);
-    switch (waited) {
-        .WAIT_0 => {
-            // Child.wait narrows Windows exit status to u8.
-            const code: u32 = @bitCast(@backingInt(info.ExitStatus));
-            const term = try child.wait(io);
-            return .{ .term = if (code > 255) .{ .unknown = code } else term, .timed_out = false };
-        },
-        .TIMEOUT => {
-            var buf: [32]u8 = undefined;
-            const pid = try std.fmt.bufPrint(&buf, "{d}", .{info.UniqueProcessId});
-            var taskkill = try std.process.spawn(io, .{ .argv = &.{ "taskkill.exe", "/F", "/T", "/PID", pid } });
-            defer taskkill.kill(io);
-            _ = try taskkill.wait(io);
-            child.kill(io);
+    extern "kernel32" fn CreateJobObjectW(?*const win.SECURITY_ATTRIBUTES, ?[*:0]const u16) callconv(.winapi) ?win.HANDLE;
+    extern "kernel32" fn AssignProcessToJobObject(win.HANDLE, win.HANDLE) callconv(.winapi) win.BOOL;
+    extern "kernel32" fn TerminateJobObject(win.HANDLE, u32) callconv(.winapi) win.BOOL;
+    extern "kernel32" fn GetExitCodeProcess(win.HANDLE, *u32) callconv(.winapi) win.BOOL;
+
+    fn run(child: std.process.Child, timeout: Io.Duration) !Outcome {
+        const process = child.id.?;
+        defer win.CloseHandle(process);
+        defer win.CloseHandle(child.thread_handle);
+        errdefer _ = win.ntdll.NtTerminateProcess(process, .UNSUCCESSFUL);
+
+        // Assign the suspended process before a Godot launcher can spawn children.
+        const job = CreateJobObjectW(null, null) orelse return error.CreateJobFailed;
+        defer win.CloseHandle(job);
+        if (!AssignProcessToJobObject(job, process).toBool()) return error.AssignJobFailed;
+        defer _ = TerminateJobObject(job, 1);
+        const resumed = win.ntdll.NtResumeThread(child.thread_handle, null);
+        if (resumed != .SUCCESS) return win.unexpectedStatus(resumed);
+
+        if (!try wait(process, timeout)) {
+            if (!TerminateJobObject(job, 1).toBool()) return error.TerminateJobFailed;
+            if (!try wait(process, .fromSeconds(2))) return error.JobCleanupTimedOut;
             return .{ .term = .{ .unknown = 0 }, .timed_out = true };
-        },
-        else => return win.unexpectedStatus(waited),
+        }
+        // Child.wait narrows Windows exit status to u8.
+        var code: u32 = undefined;
+        if (!GetExitCodeProcess(process, &code).toBool()) return error.ExitCodeUnavailable;
+        return .{ .term = if (code > 255) .{ .unknown = code } else .{ .exited = @intCast(code) }, .timed_out = false };
     }
-}
+
+    fn wait(process: win.HANDLE, timeout: Io.Duration) !bool {
+        const ticks: i64 = @intCast(-@divFloor(timeout.nanoseconds + 99, 100));
+        return switch (win.ntdll.NtWaitForSingleObject(process, .FALSE, &ticks)) {
+            .WAIT_0 => true,
+            .TIMEOUT => false,
+            else => |s| win.unexpectedStatus(s),
+        };
+    }
+};
 
 pub const video_marker = "SMOKE: Hap fixture opened, played, sought, cleared, and rejected synchronous/asynchronous invalid replacements";
 pub const audio_marker = "AUDIO_SMOKE: mono16, stereo16BE, stereo24BE captured from both players; seek/loop content, controls, unsupported audio, and teardown passed";
@@ -300,74 +380,94 @@ fn fallback(line: []const u8) bool {
 }
 
 fn validate(text: []const u8, scene: Scene, driver: Driver, requested_audio: ?[]const u8, w: *Io.Writer) Io.Writer.Error!bool {
+    var validation: Validation = .{ .scene = scene, .driver = driver, .requested_audio = requested_audio };
     var lines = std.mem.splitScalar(u8, text, '\n');
-    var is_46 = false;
-    while (lines.next()) |line| {
-        if (startsWith(u8, line, "Godot Engine v4.6.")) is_46 = true;
-    }
+    while (lines.next()) |line| validation.noteVersion(line);
     lines.reset();
-    const marker = if (scene == .video) video_marker else audio_marker;
-    const allowed: []const []const u8 = if (scene == .video) &video_errors else &audio_errors;
-    var seen: [video_errors.len]bool = @splat(false);
-    var found_marker = false;
-    var found_banner = false;
-    var audio_count: usize = 0;
-    var actual_audio: []const u8 = "";
-    var ok = true;
-    next_line: while (lines.next()) |raw| {
+    while (lines.next()) |line| try validation.checkLine(line, w);
+    return validation.finish(w);
+}
+
+const Validation = struct {
+    scene: Scene,
+    driver: Driver,
+    requested_audio: ?[]const u8,
+    is_46: bool = false,
+    seen: [video_errors.len]bool = @splat(false),
+    found_marker: bool = false,
+    found_banner: bool = false,
+    audio_count: u2 = 0,
+    dummy_audio: bool = false,
+    matches_requested_audio: bool = false,
+    ok: bool = true,
+
+    fn noteVersion(v: *Validation, line: []const u8) void {
+        v.is_46 = v.is_46 or startsWith(u8, line, "Godot Engine v4.6.");
+    }
+
+    fn marker(v: *const Validation) []const u8 {
+        return if (v.scene == .video) video_marker else audio_marker;
+    }
+
+    fn checkLine(v: *Validation, raw: []const u8, w: *Io.Writer) Io.Writer.Error!void {
         const line = exactLine(raw);
-        found_marker = found_marker or eql(u8, line, marker);
-        found_banner = found_banner or deviceBanner(line, driver);
-        if (is_46) for (probes_46) |probe| {
-            if (eql(u8, line, probe)) continue :next_line;
+        v.found_marker = v.found_marker or eql(u8, line, v.marker());
+        v.found_banner = v.found_banner or deviceBanner(line, v.driver);
+        if (v.is_46) for (probes_46) |probe| {
+            if (eql(u8, line, probe)) return;
         };
+        const allowed: []const []const u8 = if (v.scene == .video) &video_errors else &audio_errors;
         for (allowed, 0..) |intentional, i| {
             if (!eql(u8, line, intentional)) continue;
-            if (seen[i]) {
+            if (v.seen[i]) {
                 try w.print("SMOKE_FAIL: Repeated intentional error: {s}\n", .{line});
-                ok = false;
+                v.ok = false;
             }
-            seen[i] = true;
-            continue :next_line;
+            v.seen[i] = true;
+            return;
         }
         if (failureSignature(line)) {
             try w.print("SMOKE_FAIL: {s}\n", .{line});
-            ok = false;
+            v.ok = false;
         }
-        if (scene == .audio) {
+        if (v.scene == .audio) {
             if (startsWith(u8, line, audio_prefix) and line.len > audio_prefix.len) {
-                audio_count += 1;
-                actual_audio = line[audio_prefix.len..];
+                v.audio_count +|= 1;
+                const actual_audio = line[audio_prefix.len..];
+                v.dummy_audio = std.ascii.eqlIgnoreCase(actual_audio, "Dummy");
+                if (v.requested_audio) |requested| v.matches_requested_audio = eql(u8, actual_audio, requested);
             }
             if (contains(line, "AudioDriverDummy") != null or
                 (contains(line, "audio driver") != null and contains(line, "Dummy") != null))
             {
                 try w.print("SMOKE_FAIL: PCM capture requires a real audio driver: {s}\n", .{line});
-                ok = false;
+                v.ok = false;
             }
             if (fallback(line)) {
                 try w.print("SMOKE_FAIL: Audio driver fallback is not allowed: {s}\n", .{line});
-                ok = false;
+                v.ok = false;
             }
         }
     }
-    if (!found_marker) try w.print("SMOKE_FAIL: Missing exact success marker: {s}\n", .{marker});
-    if (!found_banner) try w.print("SMOKE_FAIL: No {t} Forward+ RenderingDevice in engine output\n", .{driver});
-    ok = ok and found_marker and found_banner;
-    if (scene == .audio) {
-        if (audio_count != 1 or std.ascii.eqlIgnoreCase(actual_audio, "Dummy")) {
-            try w.writeAll("SMOKE_FAIL: PCM capture requires one exact real audio driver marker\n");
-            ok = false;
-        }
-        if (requested_audio) |requested| {
-            if (audio_count != 1 or !eql(u8, requested, actual_audio)) {
-                try w.print("SMOKE_FAIL: Missing exact requested audio driver marker: {s}{s}\n", .{ audio_prefix, requested });
+    fn finish(v: *const Validation, w: *Io.Writer) Io.Writer.Error!bool {
+        if (!v.found_marker) try w.print("SMOKE_FAIL: Missing exact success marker: {s}\n", .{v.marker()});
+        if (!v.found_banner) try w.print("SMOKE_FAIL: No {t} Forward+ RenderingDevice in engine output\n", .{v.driver});
+        var ok = v.ok and v.found_marker and v.found_banner;
+        if (v.scene == .audio) {
+            if (v.audio_count != 1 or v.dummy_audio) {
+                try w.writeAll("SMOKE_FAIL: PCM capture requires one exact real audio driver marker\n");
                 ok = false;
             }
+            if (v.requested_audio) |requested| {
+                if (v.audio_count != 1 or !v.matches_requested_audio) {
+                    try w.print("SMOKE_FAIL: Missing exact requested audio driver marker: {s}{s}\n", .{ audio_prefix, requested });
+                    ok = false;
+                }
+            }
         }
+        return ok;
     }
-    return ok;
-}
+};
 
 const expect = std.testing.expect;
 const expectEqualStrings = std.testing.expectEqualStrings;
@@ -463,11 +563,62 @@ test "separate logs preserve errors and markers at stream boundaries" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const gpa = std.testing.allocator;
-    var discard: Io.Writer.Discarding = .init(&.{});
-    try tmp.dir.writeFile(io, .{ .sub_path = "stdout.log", .data = video_log[0 .. video_log.len - 1] });
+    var replay: Io.Writer.Allocating = .init(gpa);
+    defer replay.deinit();
+    var diagnostics: Io.Writer.Allocating = .init(gpa);
+    defer diagnostics.deinit();
+    const output = probes_46[0] ++ "\r\n" ++ video_log[0 .. video_log.len - 1];
+    try tmp.dir.writeFile(io, .{ .sub_path = "stdout.log", .data = output });
+    try tmp.dir.writeFile(io, .{ .sub_path = "stderr.log", .data = "Godot Engine v4.6.3.stable" });
+    var validation: Validation = .{ .scene = .video, .driver = .default, .requested_audio = null };
+    try expect(try inspectLogs(gpa, io, tmp.dir, "stdout.log", "stderr.log", &validation, &replay.writer, &diagnostics.writer));
+    try expectEqualStrings(output ++ "\nGodot Engine v4.6.3.stable", replay.written());
+    try expectEqualStrings("", diagnostics.written());
+
     try tmp.dir.writeFile(io, .{ .sub_path = "stderr.log", .data = "ERROR: unexpected" });
-    const text = try readLogs(gpa, io, tmp.dir, "stdout.log", "stderr.log");
-    defer gpa.free(text);
-    try expectEqualStrings(video_log ++ "ERROR: unexpected", text);
-    try expect(!try validate(text, .video, .default, null, &discard.writer));
+    replay.clearRetainingCapacity();
+    validation = .{ .scene = .video, .driver = .default, .requested_audio = null };
+    try expect(!try inspectLogs(gpa, io, tmp.dir, "stdout.log", "stderr.log", &validation, &replay.writer, &diagnostics.writer));
+    try expectEqualStrings(output ++ "\nERROR: unexpected", replay.written());
+    try expectEqualStrings("SMOKE_FAIL: " ++ probes_46[0] ++ "\nSMOKE_FAIL: ERROR: unexpected\n", diagnostics.written());
+}
+
+test "large logs replay and validate with memory bounded by line length" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const line = "verbose update " ++ @as([9000]u8, @splat('x')) ++ "\r\n";
+    const count = 1024;
+    {
+        const file = try tmp.dir.createFile(io, "merged.log", .{});
+        defer file.close(io);
+        for (0..count) |_| try file.writeStreamingAll(io, line);
+        try file.writeStreamingAll(io, video_log[0 .. video_log.len - 1]);
+    }
+    var memory: [32 * 1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&memory);
+    var replay: Io.Writer.Discarding = .init(&.{});
+    var diagnostics: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var validation: Validation = .{ .scene = .video, .driver = .vulkan, .requested_audio = null };
+    try expect(try inspectLogs(fba.allocator(), io, tmp.dir, "merged.log", null, &validation, &replay.writer, &diagnostics.writer));
+    try std.testing.expectEqual(count * line.len + video_log.len - 1, replay.count);
+    try expectEqualStrings("", diagnostics.written());
+}
+
+test "default runs reserve separate directories with the same log file names" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = ".zig-cache/smoke";
+    var path_buffers: [2][root.len + 1 + 32]u8 = undefined;
+    const first = try createLogDir(io, tmp.dir, root, &path_buffers[0]);
+    const second = try createLogDir(io, tmp.dir, root, &path_buffers[1]);
+    try expect(!eql(u8, first, second));
+    for ([_][]const u8{ first, second }) |path| {
+        const logs = try tmp.dir.openDir(io, path, .{});
+        defer logs.close(io);
+        const file = try logs.createFile(io, "video-smoke.log", .{ .exclusive = true });
+        file.close(io);
+    }
 }

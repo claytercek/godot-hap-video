@@ -75,21 +75,28 @@ fn verifyEntry(io: Io, entry: Io.Dir.Walker.Entry, path: []const u8, required: *
 }
 
 fn addLibraries(allocator: Allocator, source: []const u8, required: *Paths) !void {
+    if (!std.unicode.utf8ValidateSlice(source)) return error.InvalidManifestEncoding;
     const whitespace = " \t\r";
     var sections: Paths = .init(allocator);
     var keys: Paths = .init(allocator);
     var section: []const u8 = "";
+    var option_indent: ?usize = null;
     var lines = std.mem.splitScalar(u8, source, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, whitespace);
         if (line.len == 0 or line[0] == '#' or line[0] == ';') continue;
+        const indent = raw.len - std.mem.trimStart(u8, raw, whitespace).len;
+        // A more deeply indented line can continue the previous value.
+        if (option_indent != null and indent > option_indent.?) return error.AmbiguousContinuation;
         if (line[0] == '[') {
             if (line.len < 3 or line[line.len - 1] != ']') return error.InvalidSection;
             section = line[1 .. line.len - 1];
             if ((try sections.getOrPut(section)).found_existing) return error.DuplicateSection;
             keys.clearRetainingCapacity();
+            option_indent = null;
             continue;
         }
+        option_indent = indent;
         const separator = std.mem.indexOfAny(u8, line, "=:") orelse return error.InvalidOption;
         const key = std.mem.trimEnd(u8, line[0..separator], whitespace);
         if (section.len == 0 or key.len == 0) return error.InvalidOption;
@@ -164,6 +171,24 @@ test "unexpected stale file" {
     defer tmp.cleanup();
     try writeFixture(tmp.dir, "old.dll", "stale");
     try testing.expectError(error.UnexpectedPackageFile, checkFixture(tmp));
+}
+
+test "invalid UTF-8 anywhere in the manifest is rejected" {
+    var tmp = try fixture();
+    defer tmp.cleanup();
+    try writeFixture(tmp.dir, manifest, "# \xff\n[libraries]\nlinux.debug = \"bin/video.so\"\n");
+    try testing.expectError(error.InvalidManifestEncoding, checkFixture(tmp));
+}
+
+test "an indented continuation cannot introduce a library" {
+    var tmp = try fixture();
+    defer tmp.cleanup();
+    try writeFixture(tmp.dir, manifest,
+        \\[libraries]
+        \\linux.debug = "bin/video.so"
+        \\  windows.debug = "video.dll"
+    );
+    try testing.expectError(error.AmbiguousContinuation, checkFixture(tmp));
 }
 
 test "unsafe manifest paths" {
