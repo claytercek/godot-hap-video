@@ -18,18 +18,57 @@ on:
       - ".github/workflows/**"
   pull_request:
     branches: [main]
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-jobs:
-  build:
-    uses: ./.github/workflows/build.yml
+concurrency:
+  group: test-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-  linux-smoke:
-    name: Linux tests & smoke (Godot ${{ matrix.godot }})
-    needs: build
+jobs:
+  # Smoke needs this artifact, not the rest of the release matrix.
+  build-linux-release:
+    uses: ./.github/workflows/build.yml
+    with:
+      platform: linux
+      flavor: release
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos, linux, windows]
+        flavor: [debug, release]
+        exclude:
+          - platform: linux
+            flavor: release
+    uses: ./.github/workflows/build.yml
+    with:
+      platform: ${{ matrix.platform }}
+      flavor: ${{ matrix.flavor }}
+
+  native-tests:
+    name: Debug safety checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+          cache-key: native-tests
+      - name: Run core and validation tool tests
+        run: zig build test --summary all
+
+  test:
+    name: Linux smoke (Godot ${{ matrix.godot }})
+    needs: build-linux-release
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
@@ -47,6 +86,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
+          cache-key: smoke-${{ matrix.godot }}
       - uses: chickensoft-games/setup-godot@v2
         with:
           version: ${{ matrix.godot }}
@@ -61,7 +101,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends xvfb xauth mesa-vulkan-drivers libvulkan1 pulseaudio pulseaudio-utils libpulse0
       - uses: actions/download-artifact@v4
         with:
-          name: hap-video-linux
+          name: hap-video-linux-release
           path: staging
       - name: Install release extension
         run: |
@@ -122,13 +162,30 @@ jobs:
           export PULSE_SINK=hap_smoke PULSE_SOURCE=hap_smoke.monitor
           xvfb-run -a -e ci-logs/xvfb.log -s '-screen 0 640x480x24 -nolisten tcp' \
             zig run tools/smoke.zig -- --log-dir ci-logs --driver vulkan --audio --audio-driver PulseAudio -- --display-driver x11
-      - name: Run core and validation tool tests
-        if: matrix.godot == '4.7.2'
-        timeout-minutes: 5
-        run: zig build test --summary all 2>&1 | tee ci-logs/native-tests.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: test-linux-godot-${{ matrix.godot }}
           path: ci-logs/*.log
           if-no-files-found: warn
+
+  build-smoke-gate:
+    name: Build & Smoke (all)
+    needs: [build, build-linux-release, native-tests, test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 2
+    steps:
+      - name: Require builds, native tests, and smoke tests to pass
+        env:
+          BUILD: ${{ needs.build.result }}
+          LINUX_RELEASE: ${{ needs.build-linux-release.result }}
+          NATIVE: ${{ needs.native-tests.result }}
+          SMOKE: ${{ needs.test.result }}
+        run: |
+          echo "build=$BUILD linux-release=$LINUX_RELEASE native-tests=$NATIVE smoke=$SMOKE"
+          test "$BUILD" = success
+          test "$LINUX_RELEASE" = success
+          test "$NATIVE" = success
+          test "$SMOKE" = success
