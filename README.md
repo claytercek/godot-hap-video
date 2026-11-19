@@ -183,26 +183,21 @@ against chunk-level parallelism.
 
 ## Build from source
 
-Clone the repository; no submodules are required:
+Install [Zig 0.17.0](https://ziglang.org/download/) and
+[Git LFS](https://git-lfs.com/), then clone the repository:
 
 ```bash
-git clone <repository-url>
+git lfs install
+git clone https://github.com/claytercek/godot-hap-video.git
 cd godot-hap-video
-```
-
-Install **Zig 0.17.0** from [Zig](https://ziglang.org/download/). Core tests need
-no Godot installation:
-
-```bash
-zig version             # 0.17.0
 zig build test
 ```
 
-`build.zig.zon` pins upstream gdzig to
-`c05f4910e2bf72cb947423acee6554dd0d29b041`, verified by its Zig package hash.
-The first build needs network access; later builds use Zig's cache. gdzig
-bundles the Godot API and interface header, so building and cross-compiling
-need no Godot executable.
+For an existing checkout, run `git lfs pull` before testing, benchmarking, or
+running the demo. The [fixture inventory](tests/fixtures/README.md) describes
+the media and golden frames. `zig build test` uses these files without Godot,
+FFmpeg, or Python. The first build also downloads the pinned gdzig dependency,
+which bundles the Godot API and interface header.
 
 `run`, `smoke`, and `audio-smoke` require a separate Godot 4.6+ installation.
 The executable lookup order is `-Dgodot-path`, `GODOT_PATH`, then `godot` on
@@ -225,87 +220,35 @@ Development builds install into `project/lib/` and use
 zig build                         # build the development extension
 zig build run                     # build, then run the development demo
 zig build smoke                   # build, then run video and audio smokes serially
-zig build audio-smoke             # same prerequisites, ending with PCM capture checks
-zig build test -Dtest-optimize=debug # core tests with Zig runtime safety checks
 zig build test -Dsanitize-c=full  # core tests with C/C++ UBSan
+zig build bench                   # benchmark open, close, and decode against the fixtures
 ```
 
 `zig build run -- <args>` forwards `<args>` to Godot.
 
-### Fixtures
-
-Tests use committed media under `tests/fixtures/`. Regenerate it from the
-project root with `bash scripts/generate_fixtures.sh`, using Python 3 and
-FFmpeg built with `--enable-libsnappy`. Stereo PCM fixtures reuse committed
-Hap video and need only Python 3:
-
-```bash
-python3 scripts/generate_pcm_fixtures.py
-python3 scripts/generate_pcm_fixtures.py --check
-```
-
 ### Smoke tests
 
-`zig build smoke` and `zig build audio-smoke` run the video scene followed by
-`project/audio_smoke.tscn`. Both must print their completion markers; Godot's
-exit code alone does not prove success. Video needs a `RenderingDevice`, and
-PCM capture needs a real audio driver. Neither headless mode nor Dummy audio
-can validate these checks. PCM capture runs upstream of a muted sink bus and
-produces no audible sound.
+`zig build smoke` runs the rendered video scene followed by the PCM capture
+scene. Both must print their completion markers and exit without unexpected
+errors or leaks. Video needs a Forward+ rendering device; PCM capture needs
+a real audio driver. Headless mode and Dummy audio lack those devices. The audio
+scene captures upstream of a muted bus, so no sound plays through the speakers.
 
-The scenes check presentation, metadata, seeking, rejected stream replacements,
-and reference cleanup. PCM checks cover mono duplication, stereo16/24
-big-endian conversion and normalization, seek/loop content, pause/speed/volume/bus
-controls, completion, and teardown. Regressions cover retained old
-playbacks, paused stock-player starts/restarts, audio-track restoration without
-a seek, and terminal decode failure while looping. The last test corrupts a
-late video frame in a temporary MOV, preserving PCM and sample tables; its
-decoder error log is expected. Synthetic unsupported audio metadata tests
-video-only fallback.
-
-On Godot 4.6, gdzig logs missing 4.7 interface probes at startup:
-`variant_get_type_by_name`, `classdb_construct_object3`, and
-`classdb_register_extension_class6`. The 4.6 fallback still runs and passes smoke.
-
-To test an existing library without rebuilding or overwriting it:
+To test a library already installed in `project/lib/` without rebuilding it,
+run the same checker from the repository root:
 
 ```bash
-python3 tests/run_smoke.py --godot gdvm --gdvm-version 4.7.2 \
-  --driver default --audio --log-dir ci-logs
-python3 -m unittest discover -s tests -p 'test_*.py' -v
+zig run tools/smoke.zig -- --audio --log-dir ci-logs
 ```
 
-The runner executes the scenes serially with deadlines, exact completion
-markers, and a required Forward+ device banner. Its log checker permits only
-the scenes' exact intentional errors and the known Godot 4.6 interface probes;
-other errors and leaks fail even after a successful exit.
-
-Omit `--audio` for video-only smoke. PCM uses normal engine cadence and a real
-audio driver. `--audio-driver` selects a driver and requires its exact log
-marker. Omit it for Godot's native default, including CoreAudio on macOS.
-CI requires `--audio-driver PulseAudio` and the exact
-`AUDIO_SMOKE_DRIVER: PulseAudio` marker; driver fallback fails validation.
+Omit `--audio` for video only. Use `--audio-driver PulseAudio` with `--audio`
+to require that specific driver, or omit `--audio-driver` for the native
+default. With `gdvm`, pass `--godot "$(gdvm show 4.7.2)"`.
 
 ### CI and packaging
 
-CI and releases use `.github/workflows/build.yml` to cross-compile all platform
-and architecture targets on Ubuntu 24.04 with Zig 0.17.0. The `safe` and `fast`
-builds become debug and release libraries. `llvm-lipo-18` combines and verifies
-the macOS universal libraries. Builds never install or run host Godot. Artifacts
-are named `hap-video-macos`, `hap-video-linux`, and `hap-video-windows`.
-
-Runtime CI tests the Linux x86_64 release artifact without rebuilding. It runs
-Godot 4.7.2 and 4.6.3 on Ubuntu 24.04 with Xvfb, Mesa software Vulkan, and
-PulseAudio's virtual 48,000 Hz stereo sink. Core and Python helper tests run
-once in the 4.7.2 job. CI uploads build and runtime logs; sanitizer and benchmark
-workflows run separately.
-
-For release recovery, run the Release workflow with `package-only` and an
-existing `release-tag` to rebuild that tag and replace its ZIP. Leave the tag
-empty to upload a workflow artifact without creating a release. Build and
-packaging must use the same source ref, not the current branch tip. Packaging
-checks every manifest library and required notice, including Snappy AUTHORS,
-and rejects stale extra files.
+See [Contributing](CONTRIBUTING.md) for CI coverage, package validation, and
+release recovery.
 
 ## Project layout
 

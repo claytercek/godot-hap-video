@@ -14,5 +14,7 @@
         "build.zig.zon",
         "src",
         "thirdparty",
+        "tools",
+        "tests/fake_godot.zig",
     },
 }

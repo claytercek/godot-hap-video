@@ -200,10 +200,10 @@ extern "kernel32" fn CloseHandle(
 const repo_root_hap1_mov = "tests/fixtures/hap1.mov";
 
 test "init maps a real fixture file and reads its MP4 box header" {
-    var reader = try MmapReader.init(repo_root_hap1_mov);
+    var reader = try @import("fixture_data.zig").open(repo_root_hap1_mov);
     defer reader.deinit();
 
-    try std.testing.expect(reader.data.len > 0);
+    try std.testing.expect(reader.data.len >= 8);
     // ISO base media file format: a 4-byte big-endian box size followed by a
     // 4-byte box type. The first box in a .mov is typically "ftyp".
     try std.testing.expectEqualSlices(u8, "ftyp", reader.data[4..8]);

@@ -29,8 +29,8 @@
 //! minimp4.c/snappy.cc with clang -fsanitize-coverage=trace-cmp calls
 //! (__sanitizer_cov_trace_cmp*, _switch, _const_cmp*) that Zig's fuzzer
 //! runtime does not implement. This also failed on Zig 0.17.0,
-//! aarch64-macos. scripts/fuzz_demuxer.sh tries coverage-guided fuzzing with
-//! -Dtest-optimize=fast, then falls back to the HAP_FUZZ_SECONDS bounded loop.
+//! aarch64-macos. Use `HAP_FUZZ_SECONDS=5 zig build test` for bounded fuzzing
+//! without coverage instrumentation.
 
 const std = @import("std");
 const testing = std.testing;
@@ -80,16 +80,7 @@ const fixture_paths = [_][]const u8{
     "tests/fixtures/hapy_chunked.mov",
 };
 
-const regression_paths = [_][]const u8{
-    "tests/fixtures/fuzz_regressions/crash_0c3b48b5_ts_overflow.bin",
-    "tests/fixtures/fuzz_regressions/crash_36735b5f.bin",
-    "tests/fixtures/fuzz_regressions/crash_783ca462.bin",
-    "tests/fixtures/fuzz_regressions/crash_85883b19.bin",
-    "tests/fixtures/fuzz_regressions/leak_9b88d453.bin",
-    "tests/fixtures/fuzz_regressions/oom_9c36f721.bin",
-};
-
-const corpus_paths = fixture_paths ++ regression_paths;
+const corpus_paths = fixture_paths ++ test_support.regression_paths;
 
 test "fuzz Demuxer.open on arbitrary bytes" {
     var readers: [corpus_paths.len]MmapReader = undefined;
@@ -97,22 +88,15 @@ test "fuzz Demuxer.open on arbitrary bytes" {
     defer for (readers[0..opened]) |*r| r.deinit();
 
     var corpus: [corpus_paths.len][]const u8 = undefined;
-    var corpus_len: usize = 0;
-
     for (corpus_paths) |path| {
-        readers[opened] = MmapReader.init(path) catch continue; // fixture missing: skip, don't fail the suite
-        corpus[corpus_len] = readers[opened].data;
+        readers[opened] = try @import("fixture_data.zig").open(path);
+        corpus[opened] = readers[opened].data;
         opened += 1;
-        corpus_len += 1;
     }
 
-    try testing.fuzz({}, fuzzOpen, .{ .corpus = corpus[0..corpus_len] });
+    try testing.fuzz({}, fuzzOpen, .{ .corpus = &corpus });
 }
 
-// Bounded random loop driven by scripts/fuzz_demuxer.sh; skip unless
-// HAP_FUZZ_SECONDS is set. Feed PRNG bytes through Smith.in to exercise
-// bounds/overflow checks. Generation uses no coverage feedback; this
-// substitutes for --fuzz while the vendored C sources prevent linking.
 test "bounded randomized fuzz (opt-in via HAP_FUZZ_SECONDS)" {
     const raw = std.c.getenv("HAP_FUZZ_SECONDS") orelse return error.SkipZigTest;
     const seconds = std.fmt.parseInt(u32, std.mem.span(raw), 10) catch return error.SkipZigTest;

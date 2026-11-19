@@ -44,6 +44,36 @@ fn addCoreCSources(b: *Build, mod: *Build.Module, target: Build.ResolvedTarget) 
     });
 }
 
+fn testSmokeCli(b: *Build, runner: *Build.Step.Compile, test_step: *Build.Step) void {
+    const child = b.addExecutable(.{ .name = "fake-godot", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/fake_godot.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "smoke", .module = runner.root_module }},
+    }) });
+    const Mode = enum { pass, exit, timeout };
+    for (std.enums.values(Mode)) |mode| {
+        const run = b.addRunArtifact(runner);
+        run.addArg("--godot");
+        run.addArtifactArg(child);
+        run.addArgs(&.{ "--audio", "--log-dir" });
+        _ = run.addOutputDirectoryArg(@tagName(mode));
+        run.setEnvironmentVariable("FAKE_GODOT", @tagName(mode));
+        run.expectExitCode(if (mode == .pass) 0 else 1);
+        switch (mode) {
+            .pass => {
+                run.expectStdErrMatch("res://audio_smoke.tscn");
+                run.expectStdOutMatch("AUDIO_SMOKE:");
+            },
+            .exit => run.expectStdErrMatch("exited with code 3"),
+            .timeout => {
+                run.addArgs(&.{ "--timeout", "1" });
+                run.expectStdErrMatch("SMOKE_TIMEOUT:");
+            },
+        }
+        test_step.dependOn(&run.step);
+    }
+}
+
 pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size") orelse .fast;
@@ -81,9 +111,28 @@ pub fn build(b: *Build) !void {
     });
     addCoreCSources(b, core_test_mod, target);
 
-    const core_tests = b.addTest(.{ .root_module = core_test_mod });
-    const test_step = b.step("test", "Run core unit tests (no Godot needed)");
-    test_step.dependOn(&b.addRunArtifact(core_tests).step);
+    const test_step = b.step("test", "Run core, fixture, and validation tool tests (no Godot needed)");
+    const core_tests = b.addRunArtifact(b.addTest(.{ .root_module = core_test_mod }));
+    core_tests.setCwd(b.path("."));
+    // Tests read LFS fixtures at runtime, outside the compiler's cache key.
+    core_tests.has_side_effects = true;
+    test_step.dependOn(&core_tests.step);
+
+    const smoke_mod = b.createModule(.{
+        .root_source_file = b.path("tools/smoke.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+    });
+    const package_check_mod = b.createModule(.{
+        .root_source_file = b.path("tools/check_packaged_addon.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+    });
+    for ([_]*Build.Module{ smoke_mod, package_check_mod }) |module| {
+        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
+    }
+    const smoke_exe = b.addExecutable(.{ .name = "smoke", .root_module = smoke_mod });
+    testSmokeCli(b, smoke_exe, test_step);
 
     // Benchmark open/close/decode without Godot, using the shipped core_mod
     // optimization mode rather than core_test_mod.
@@ -145,31 +194,12 @@ pub fn build(b: *Build) !void {
     run.step.dependOn(&install.step);
     b.step("run", "Run the development demo project in Godot (forwards -- <args>)").dependOn(&run.step);
 
-    const smoke = Build.Step.Run.create(b, "open and present the bundled Hap fixture in Godot");
-    smoke.addArg(godot_path);
-    // The smoke opens and presents a real Hap frame, so it needs a rendering
-    // driver; Godot's headless mode has no RenderingDevice.
-    smoke.addArg("--path");
-    smoke.addDirectoryArg(b.path("project"));
-    smoke.addArg("res://smoke.tscn");
-    // Godot can exit successfully after a script fails to load. Require the
-    // end-of-test marker, and rerun even when the extension is unchanged.
-    smoke.expectStdOutMatch("SMOKE: Hap fixture opened, played, sought, cleared, and rejected synchronous/asynchronous invalid replacements");
+    const smoke = b.addRunArtifact(smoke_exe);
+    smoke.setCwd(b.path("."));
+    smoke.addArgs(&.{ "--godot", godot_path, "--audio" });
+    smoke.addPassthruArgs();
     smoke.has_side_effects = true;
     smoke.step.dependOn(&install.step);
-
-    const audio_smoke = Build.Step.Run.create(b, "capture embedded PCM from both Godot players");
-    audio_smoke.addArg(godot_path);
-    audio_smoke.addArg("--path");
-    audio_smoke.addDirectoryArg(b.path("project"));
-    audio_smoke.addArg("res://audio_smoke.tscn");
-    audio_smoke.expectStdOutMatch("AUDIO_SMOKE: mono16, stereo16BE, stereo24BE captured from both players; seek/loop content, controls, unsupported audio, and teardown passed");
-    audio_smoke.has_side_effects = true;
-    audio_smoke.step.dependOn(&install.step);
-    b.step("audio-smoke", "Capture PCM and verify audio controls (requires a real audio driver)").dependOn(&audio_smoke.step);
-
-    // Serial execution avoids racing Godot's project/import cache. The audio
-    // scene captures before a muted sink bus: no physical speaker is needed.
-    audio_smoke.step.dependOn(&smoke.step);
-    b.step("smoke", "Run video ownership/presentation and PCM capture smoke tests serially").dependOn(&audio_smoke.step);
+    b.step("smoke", "Run rendered Godot video and PCM smoke tests").dependOn(&smoke.step);
+    b.step("audio-smoke", "Alias for smoke").dependOn(&smoke.step);
 }

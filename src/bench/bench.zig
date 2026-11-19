@@ -1,7 +1,5 @@
 //! Measure open/close and per-frame decode costs for the checked-in Hap
 //! fixtures. `zig build bench` runs without Godot, as does `zig build test`.
-//! Measurement functions document their methods. Missing fixtures print a
-//! note to stderr and skip the measurement.
 
 const std = @import("std");
 const core = @import("core");
@@ -71,6 +69,8 @@ pub fn main(init: std.process.Init) !void {
 
     const json_path = parseArgs(init.minimal.args);
 
+    for (decode_fixtures) |path| try core.fixture_data.require(path);
+
     var results: std.ArrayListUnmanaged(Result) = .empty;
     defer results.deinit(allocator);
 
@@ -106,39 +106,27 @@ fn parseArgs(process_args: std.process.Args) ?[]const u8 {
     return null;
 }
 
-/// Decode a frame from the first available chunked fixture before timing.
+/// Decode a frame from a chunked fixture before timing.
 /// This starts the lazy inner-pool singleton's workers outside the samples;
 /// non-chunked frames do not dispatch to the pool.
 fn warmUpThreadPool(allocator: std.mem.Allocator) !void {
-    for (chunked_fixtures) |path| {
-        var reader = MmapReader.init(path) catch continue;
-        defer reader.deinit();
+    var reader = try MmapReader.init(chunked_fixtures[0]);
+    defer reader.deinit();
 
-        var dem: Demuxer = .{};
-        dem.open(allocator, &reader) catch {
-            dem.deinit(allocator);
-            continue;
-        };
-        defer dem.deinit(allocator);
+    var dem: Demuxer = .{};
+    defer dem.deinit(allocator);
+    try dem.open(allocator, &reader);
+    const sample = dem.sampleData(&reader, 0) orelse return error.MissingFixtureSample;
 
-        const sample = dem.sampleData(&reader, 0) orelse continue;
-
-        var frame: DecodedFrame = .{};
-        defer frame.deinit(allocator);
-        core.decoder.decode(allocator, sample, &frame) catch continue;
-        return;
-    }
+    var frame: DecodedFrame = .{};
+    defer frame.deinit(allocator);
+    try core.decoder.decode(allocator, sample, &frame);
 }
 
 /// Times `open_close_iterations` open->close cycles for `path`, reporting
 /// the median open time and median close time separately. Open is
 /// MmapReader.init + Demuxer.open; close is Demuxer.deinit + reader.deinit.
 fn benchOpenClose(allocator: std.mem.Allocator, path: []const u8, results: *std.ArrayListUnmanaged(Result)) !void {
-    if (!fixtureExists(path)) {
-        std.debug.print("skip (missing fixture): {s}\n", .{path});
-        return;
-    }
-
     var open_ms: [open_close_iterations]f64 = undefined;
     var close_ms: [open_close_iterations]f64 = undefined;
     var timer = Timer.start();
@@ -146,7 +134,9 @@ fn benchOpenClose(allocator: std.mem.Allocator, path: []const u8, results: *std.
     for (0..open_close_iterations) |i| {
         timer.reset();
         var reader = try MmapReader.init(path);
+        errdefer reader.deinit();
         var dem: Demuxer = .{};
+        errdefer dem.deinit(allocator);
         try dem.open(allocator, &reader);
         open_ms[i] = nsToMs(timer.read());
 
@@ -173,20 +163,15 @@ fn benchOpenClose(allocator: std.mem.Allocator, path: []const u8, results: *std.
 /// reusing one DecodedFrame across calls (decode() clears/repopulates it),
 /// and reports the median pass time divided by frame count as ms/frame.
 fn benchDecode(allocator: std.mem.Allocator, path: []const u8, results: *std.ArrayListUnmanaged(Result)) !void {
-    if (!fixtureExists(path)) {
-        std.debug.print("skip (missing fixture): {s}\n", .{path});
-        return;
-    }
-
     var reader = try MmapReader.init(path);
     defer reader.deinit();
 
     var dem: Demuxer = .{};
-    try dem.open(allocator, &reader);
     defer dem.deinit(allocator);
+    try dem.open(allocator, &reader);
 
     const frame_count = dem.track.frame_count;
-    if (frame_count == 0) return;
+    if (frame_count == 0) return error.MissingFixtureSample;
 
     var frame: DecodedFrame = .{};
     defer frame.deinit(allocator);
@@ -195,7 +180,7 @@ fn benchDecode(allocator: std.mem.Allocator, path: []const u8, results: *std.Arr
     // the decode path so the page-cache/allocator cost doesn't land in a
     // timed sample.
     for (0..frame_count) |i| {
-        const sample = dem.sampleData(&reader, @intCast(i)) orelse continue;
+        const sample = dem.sampleData(&reader, @intCast(i)) orelse return error.MissingFixtureSample;
         try core.decoder.decode(allocator, sample, &frame);
     }
 
@@ -205,7 +190,7 @@ fn benchDecode(allocator: std.mem.Allocator, path: []const u8, results: *std.Arr
     for (0..decode_passes) |p| {
         timer.reset();
         for (0..frame_count) |i| {
-            const sample = dem.sampleData(&reader, @intCast(i)) orelse continue;
+            const sample = dem.sampleData(&reader, @intCast(i)) orelse return error.MissingFixtureSample;
             try core.decoder.decode(allocator, sample, &frame);
         }
         pass_ms[p] = nsToMs(timer.read());
@@ -218,12 +203,6 @@ fn benchDecode(allocator: std.mem.Allocator, path: []const u8, results: *std.Arr
         .unit = "ms/frame",
         .value = ms_per_frame,
     });
-}
-
-fn fixtureExists(path: []const u8) bool {
-    var reader = MmapReader.init(path) catch return false;
-    reader.deinit();
-    return true;
 }
 
 /// The bare filename ("hap1.mov") from a "tests/fixtures/hap1.mov" path, for

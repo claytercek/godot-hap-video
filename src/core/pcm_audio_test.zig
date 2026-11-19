@@ -712,7 +712,7 @@ test "bounded randomized PCM reads cover odd empty EOS and huge starts" {
 test "scheduler PCM facade is published with open and independent of video decode" {
     const Scheduler = @import("decode_scheduler.zig").DecodeScheduler;
     const pool = @import("outer_thread_pool.zig");
-    if (!support.fixtureExists("tests/fixtures/hap1_audio.mov")) return error.SkipZigTest;
+    try support.requireFixture("tests/fixtures/hap1_audio.mov");
     var scheduler = try Scheduler.init(testing.allocator);
     defer scheduler.deinit();
     var output: [133]f32 = @splat(123);

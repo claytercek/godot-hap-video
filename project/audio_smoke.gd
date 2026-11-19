@@ -563,8 +563,7 @@ func _mov_child(bytes: PackedByteArray, begin: int, end: int, kind: String) -> V
 	var offset := begin
 	while offset + 8 <= end:
 		var size := _be32(bytes, offset)
-		# The generated fixtures use ordinary-size boxes; reject extensions
-		# rather than guessing their layout or reading outside a parent box.
+		# The fixture uses only 32-bit box sizes.
 		if size < 8 or size > end - offset:
 			return Vector2i(-1, -1)
 		if bytes.slice(offset + 4, offset + 8).get_string_from_ascii() == kind:

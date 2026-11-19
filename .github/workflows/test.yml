@@ -10,7 +10,7 @@ on:
       - "tools/**"
       - "thirdparty/**"
       - "tests/**"
-      - "scripts/**"
+      - ".gitattributes"
       - ".gitignore"
       - "README.md"
       - "build.zig"
@@ -42,28 +42,19 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
       - uses: mlugg/setup-zig@v2
-        if: matrix.godot == '4.7.2'
         with:
           version: 0.17.0
       - uses: chickensoft-games/setup-godot@v2
         with:
           version: ${{ matrix.godot }}
           use-dotnet: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
       - name: Record versions
         run: |
           mkdir -p ci-logs
-          {
-            if command -v zig >/dev/null 2>&1; then zig version; fi
-            godot --version
-            python --version
-          } 2>&1 | tee ci-logs/versions.log
-      - name: Test validation helpers
-        if: matrix.godot == '4.7.2'
-        run: python -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee ci-logs/helper-tests.log
+          { zig version; godot --version; } 2>&1 | tee ci-logs/versions.log
       - name: Install software Vulkan, Xvfb and PulseAudio
         run: |
           sudo apt-get update
@@ -72,7 +63,6 @@ jobs:
         with:
           name: hap-video-linux
           path: staging
-      # zig build smoke would overwrite this artifact: invoke Godot directly.
       - name: Install release extension
         run: |
           mkdir -p project/lib
@@ -126,9 +116,8 @@ jobs:
           pactl set-default-source hap_smoke.monitor
           export PULSE_SINK=hap_smoke PULSE_SOURCE=hap_smoke.monitor
           xvfb-run -a -e ci-logs/xvfb.log -s '-screen 0 640x480x24 -nolisten tcp' \
-            python tests/run_smoke.py --log-dir ci-logs --driver vulkan --audio --audio-driver PulseAudio -- --display-driver x11
-      # After smoke, once; core tests never install the extension.
-      - name: Run core tests
+            zig run tools/smoke.zig -- --log-dir ci-logs --driver vulkan --audio --audio-driver PulseAudio -- --display-driver x11
+      - name: Run core and validation tool tests
         if: matrix.godot == '4.7.2'
         timeout-minutes: 5
         run: zig build test --summary all 2>&1 | tee ci-logs/native-tests.log
