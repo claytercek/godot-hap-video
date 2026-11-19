@@ -5,7 +5,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const hap_frame = @import("hap_frame.zig");
-const mmap_reader = @import("mmap_reader.zig");
+const fixture_data = @import("fixture_data.zig");
 const demuxer = @import("demuxer.zig");
 const decoder = @import("decoder.zig");
 const hap_decode = @import("hap_decode.zig");
@@ -25,11 +25,8 @@ const fixture_hapm = "tests/fixtures/hapm.mov";
 // test_support.zig, shared with concurrency_test.zig.
 // -----------------------------------------------------------------------
 
-/// Decode frame 0 of a fixture .mov file. Propagates
-/// MmapReader.InitError.OpenFailed so callers can treat a missing fixture
-/// as a skip.
 fn decodeFixtureFrame0(allocator: std.mem.Allocator, path: []const u8, out: *DecodedFrame) !void {
-    var reader = try mmap_reader.MmapReader.init(path);
+    var reader = try fixture_data.open(path);
     defer reader.deinit();
 
     var dem: demuxer.Demuxer = .{};
@@ -384,10 +381,7 @@ test "decoder leaves output empty on failure even when it held a prior successfu
 /// count. Covers the two per-codec fixture tests below, which otherwise
 /// differ only in path/fourcc/format.
 fn expectFixtureDecodesToFormat(path: []const u8, expected_fourcc: hap_frame.FourCC, expected_format: HapTextureFormat) !void {
-    var reader = mmap_reader.MmapReader.init(path) catch |err| switch (err) {
-        error.OpenFailed => return error.SkipZigTest,
-        else => return err,
-    };
+    var reader = try fixture_data.open(path);
     defer reader.deinit();
 
     var dem: demuxer.Demuxer = .{};
@@ -532,10 +526,7 @@ test "decoder per-codec fixtures decode to the expected format and byte count" {
         var frame: DecodedFrame = .{};
         defer frame.deinit(testing.allocator);
 
-        decodeFixtureFrame0(testing.allocator, c.filename, &frame) catch |err| switch (err) {
-            error.OpenFailed => continue, // fixture missing: skip this case
-            else => return err,
-        };
+        try decodeFixtureFrame0(testing.allocator, c.filename, &frame);
 
         try testing.expectEqual(@as(usize, 1), frame.textures.items.len);
         try testing.expectEqual(c.format, frame.textures.items[0].format);
@@ -560,10 +551,7 @@ test "decoder chunked fixture decode is byte-identical to its unchunked counterp
         var chk: DecodedFrame = .{};
         defer chk.deinit(testing.allocator);
 
-        decodeFixtureFrame0(testing.allocator, c.unchunked, &unc) catch |err| switch (err) {
-            error.OpenFailed => continue, // fixture pair missing: skip this case
-            else => return err,
-        };
+        try decodeFixtureFrame0(testing.allocator, c.unchunked, &unc);
         try decodeFixtureFrame0(testing.allocator, c.chunked, &chk);
 
         try testing.expectEqual(unc.textures.items.len, chk.textures.items.len);
@@ -577,16 +565,10 @@ test "decoder Hap1 fixture frame0 matches the committed golden reference" {
     var frame: DecodedFrame = .{};
     defer frame.deinit(testing.allocator);
 
-    decodeFixtureFrame0(testing.allocator, fixture_hap1, &frame) catch |err| switch (err) {
-        error.OpenFailed => return error.SkipZigTest,
-        else => return err,
-    };
+    try decodeFixtureFrame0(testing.allocator, fixture_hap1, &frame);
     try testing.expect(frame.textures.items.len > 0);
 
-    var golden = mmap_reader.MmapReader.init("tests/fixtures/hap1_golden.bin") catch |err| switch (err) {
-        error.OpenFailed => return error.SkipZigTest,
-        else => return err,
-    };
+    var golden = try fixture_data.open("tests/fixtures/hap1_golden.bin");
     defer golden.deinit();
 
     const tex = frame.textures.items[0];
@@ -597,18 +579,12 @@ test "decoder Hap1 fixture frame0 matches the committed golden reference" {
 // -----------------------------------------------------------------------
 // HapM (dual-texture) fixture test.
 //
-// scripts/generate_hapm_fixture.py generates tests/fixtures/hapm.mov because
-// ffmpeg cannot encode HapM (see tests/fixtures/README.md). Its Multi-Image
-// (0x0D) frame contains None-compressed YCoCg DXT5 and A_RGTC1 sections.
-// Check the dual-texture count and indices against an on-disk sample, and
-// compare both decoded textures with the committed golden references.
+// The HapM fixture wraps None-compressed YCoCg DXT5 and A_RGTC1 in a
+// Multi-Image section to exercise dual-texture demux and decode.
 // -----------------------------------------------------------------------
 
 test "decoder HapM fixture frame0 decodes two textures matching committed golden references" {
-    var reader = mmap_reader.MmapReader.init(fixture_hapm) catch |err| switch (err) {
-        error.OpenFailed => return error.SkipZigTest,
-        else => return err,
-    };
+    var reader = try fixture_data.open(fixture_hapm);
     defer reader.deinit();
 
     var dem: demuxer.Demuxer = .{};
@@ -629,15 +605,9 @@ test "decoder HapM fixture frame0 decodes two textures matching committed golden
     try testing.expectEqual(HapTextureFormat.ycocg_dxt5, output.textures.items[0].format);
     try testing.expectEqual(HapTextureFormat.a_rgtc1, output.textures.items[1].format);
 
-    var golden0 = mmap_reader.MmapReader.init("tests/fixtures/hapm_golden_tex0.bin") catch |err| switch (err) {
-        error.OpenFailed => return error.SkipZigTest,
-        else => return err,
-    };
+    var golden0 = try fixture_data.open("tests/fixtures/hapm_golden_tex0.bin");
     defer golden0.deinit();
-    var golden1 = mmap_reader.MmapReader.init("tests/fixtures/hapm_golden_tex1.bin") catch |err| switch (err) {
-        error.OpenFailed => return error.SkipZigTest,
-        else => return err,
-    };
+    var golden1 = try fixture_data.open("tests/fixtures/hapm_golden_tex1.bin");
     defer golden1.deinit();
 
     try testing.expectEqual(golden0.data.len, output.textures.items[0].data.items.len);

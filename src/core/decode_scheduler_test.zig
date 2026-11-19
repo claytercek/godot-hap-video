@@ -1,7 +1,6 @@
 //! Headless DecodeScheduler tests for async open, serial prefetch, and
 //! seek/queue-behind behavior with real fixtures. No GPU. Fixture paths
-//! are relative to the repo root (the test working directory); missing
-//! fixtures skip the case.
+//! are relative to the repo root, the test working directory.
 
 const std = @import("std");
 const testing = std.testing;
@@ -83,7 +82,7 @@ fn drainUntil(
 // -----------------------------------------------------------------------
 
 test "scheduler open_async does not block caller" {
-    if (!test_support.fixtureExists(fixture_hap1)) return error.SkipZigTest;
+    try test_support.requireFixture(fixture_hap1);
 
     var scheduler = try DecodeScheduler.init(testing.allocator);
     defer scheduler.deinit();
@@ -122,7 +121,7 @@ test "scheduler open_async is one-shot" {
 }
 
 test "scheduler prefetches frames in order" {
-    if (!test_support.fixtureExists(fixture_hap1)) return error.SkipZigTest;
+    try test_support.requireFixture(fixture_hap1);
 
     var scheduler = try DecodeScheduler.init(testing.allocator);
     defer scheduler.deinit();
@@ -148,7 +147,7 @@ test "scheduler prefetches frames in order" {
 }
 
 test "scheduler publishes a terminal error for a corrupt sample" {
-    if (!test_support.fixtureExists(fixture_hap1)) return error.SkipZigTest;
+    try test_support.requireFixture(fixture_hap1);
 
     var scheduler = try DecodeScheduler.init(testing.allocator);
     defer scheduler.deinit();
@@ -176,14 +175,14 @@ test "scheduler publishes a terminal error for a corrupt sample" {
 }
 
 test "scheduler seek drains and retargets" {
-    if (!test_support.fixtureExists(fixture_hap1)) return error.SkipZigTest;
+    try test_support.requireFixture(fixture_hap1);
 
     var scheduler = try DecodeScheduler.init(testing.allocator);
     defer scheduler.deinit();
     try testing.expect(try openAndWait(&scheduler, fixture_hap1));
 
     const frame_count = scheduler.trackInfo().frame_count;
-    if (frame_count < 3) return error.SkipZigTest;
+    try testing.expect(frame_count >= 3);
 
     try testing.expect(scheduler.requestFrame(0, true));
     // Let a frame prefetch, then seek forward. The queue-behind contract
@@ -213,14 +212,14 @@ test "scheduler seek drains and retargets" {
 }
 
 test "scheduler backward seek drains and retargets" {
-    if (!test_support.fixtureExists(fixture_hap1)) return error.SkipZigTest;
+    try test_support.requireFixture(fixture_hap1);
 
     var scheduler = try DecodeScheduler.init(testing.allocator);
     defer scheduler.deinit();
     try testing.expect(try openAndWait(&scheduler, fixture_hap1));
 
     const frame_count = scheduler.trackInfo().frame_count;
-    if (frame_count < 15) return error.SkipZigTest;
+    try testing.expect(frame_count >= 15);
 
     try testing.expect(scheduler.requestFrame(0, true));
 
@@ -277,14 +276,14 @@ test "scheduler backward seek drains and retargets" {
 }
 
 test "scheduler rapid seeks resolve to latest target only" {
-    if (!test_support.fixtureExists(fixture_hap1)) return error.SkipZigTest;
+    try test_support.requireFixture(fixture_hap1);
 
     var scheduler = try DecodeScheduler.init(testing.allocator);
     defer scheduler.deinit();
     try testing.expect(try openAndWait(&scheduler, fixture_hap1));
 
     const frame_count = scheduler.trackInfo().frame_count;
-    if (frame_count < 45) return error.SkipZigTest;
+    try testing.expect(frame_count >= 45);
 
     try testing.expect(scheduler.requestFrame(0, true));
 
@@ -319,7 +318,7 @@ test "scheduler rapid seeks resolve to latest target only" {
 }
 
 test "scheduler capacity notification cannot be lost at fill completion" {
-    if (!test_support.fixtureExists(fixture_hap1)) return error.SkipZigTest;
+    try test_support.requireFixture(fixture_hap1);
 
     var scheduler = try DecodeScheduler.init(testing.allocator);
     defer scheduler.deinit();
@@ -365,14 +364,14 @@ test "scheduler capacity notification cannot be lost at fill completion" {
 }
 
 test "scheduler reverse prefetches frames in decreasing order" {
-    if (!test_support.fixtureExists(fixture_hap1)) return error.SkipZigTest;
+    try test_support.requireFixture(fixture_hap1);
 
     var scheduler = try DecodeScheduler.init(testing.allocator);
     defer scheduler.deinit();
     try testing.expect(try openAndWait(&scheduler, fixture_hap1));
 
     const frame_count = scheduler.trackInfo().frame_count;
-    if (frame_count < 20) return error.SkipZigTest;
+    try testing.expect(frame_count >= 20);
 
     // Reverse playback: requestFrame's `forward=false` must decode
     // *backward* from the target, i.e. the frame queue fills with
@@ -395,14 +394,14 @@ test "scheduler reverse prefetches frames in decreasing order" {
 }
 
 test "scheduler reverse playback stops cleanly at frame zero" {
-    if (!test_support.fixtureExists(fixture_hap1)) return error.SkipZigTest;
+    try test_support.requireFixture(fixture_hap1);
 
     var scheduler = try DecodeScheduler.init(testing.allocator);
     defer scheduler.deinit();
     try testing.expect(try openAndWait(&scheduler, fixture_hap1));
 
     const frame_count = scheduler.trackInfo().frame_count;
-    if (frame_count < 5) return error.SkipZigTest;
+    try testing.expect(frame_count >= 5);
 
     // Reverse playback that reaches the start of the stream must present
     // frame 0 exactly once and then settle -- no underflow (frame_index
@@ -437,7 +436,7 @@ test "scheduler reverse playback stops cleanly at frame zero" {
 }
 
 test "scheduler destruction waits for an in-flight open" {
-    if (!test_support.fixtureExists(fixture_hap1)) return error.SkipZigTest;
+    try test_support.requireFixture(fixture_hap1);
 
     const Shared = struct {
         done: std.atomic.Value(bool) = .init(false),
@@ -493,14 +492,14 @@ test "scheduler closing rejects new work before teardown drains" {
 }
 
 test "scheduler concurrent seeks never tear target and direction" {
-    if (!test_support.fixtureExists(fixture_hap1)) return error.SkipZigTest;
+    try test_support.requireFixture(fixture_hap1);
 
     var scheduler = try DecodeScheduler.init(testing.allocator);
     defer scheduler.deinit();
     try testing.expect(try openAndWait(&scheduler, fixture_hap1));
 
     const frame_count = scheduler.trackInfo().frame_count;
-    if (frame_count < 12) return error.SkipZigTest;
+    try testing.expect(frame_count >= 12);
 
     // Race two (target, direction) pairs without pauses. requestFrame must
     // publish each pair and its pending flag in one critical section;

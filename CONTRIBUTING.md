@@ -10,19 +10,18 @@ The `hap-video-macos`, `hap-video-linux`, and `hap-video-windows` artifacts
 remain the release-packaging inputs.
 
 Runtime tests run only on Ubuntu 24.04 with Godot 4.7.2 and 4.6.3. They install
-the Linux x86_64 release artifact and invoke `tests/run_smoke.py` directly;
-do not use `zig build smoke` here, because it would rebuild the extension.
+the Linux x86_64 release artifact and run `tools/smoke.zig` against it;
+`zig build smoke` would replace the downloaded library with a local build.
 Xvfb and Mesa software Vulkan provide rendered Forward+ smoke. PCM capture
 uses PulseAudio with a virtual 48,000 Hz stereo sink and requires the exact
 `AUDIO_SMOKE_DRIVER: PulseAudio` marker, rejecting Dummy audio and driver
-fallback. Native core tests and Python validation-helper tests run only in the
-primary Godot 4.7.2 job.
+fallback. `zig build test` runs the native core, smoke runner, and package
+checker tests in the primary Godot 4.7.2 job.
 
-CI no longer runs native macOS or Windows runtime tests. Cross-compilation
-and Linux-only smoke do not establish foreign-platform loadability; validate
-on the target OS when needed. Local macOS testing with `gdvm` remains supported:
-follow the README's already-built-extension smoke command and omit
-`--audio-driver` to use Godot's native default (CoreAudio on macOS).
+To run rendered checks on another OS, follow the
+[local smoke instructions](README.md#smoke-tests). For a bounded random-input
+run, set `HAP_FUZZ_SECONDS` before running `zig build test -Dtest-optimize=fast`.
+The setting gives the demuxer and decoder that many seconds each.
 
 ## Writing release notes
 
@@ -69,6 +68,10 @@ the `vX.Y.Z` tag and GitHub release, then builds, validates, and attaches
 the addon ZIP. With no pending fragments, no release PR is needed. The
 history through `v0.3.0` is preserved in `.changes/v0.3.0.md`; subsequent
 releases each have their own `.changes/v*.md` file.
+
+To check a staged package locally, run
+`zig run tools/check_packaged_addon.zig -- addon-out/addons/hap_video`.
+It checks each manifest library and required notice and rejects stale files.
 
 Edit fragments in the originating PR rather than editing generated release-PR
 files: the next update regenerates those files from `main`. Do not batch

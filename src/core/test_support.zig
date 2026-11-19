@@ -52,13 +52,16 @@ pub fn holdsFor(comptime Ctx: type, ctx: Ctx, pred: *const fn (Ctx) bool, durati
     return true;
 }
 
-/// True if `path` exists and is readable, relative to the process's
-/// current working directory (matches the repo-root-relative fixture
-/// paths used throughout the test suite).
-pub fn fixtureExists(path: []const u8) bool {
-    std.Io.Dir.cwd().access(io(), path, .{}) catch return false;
-    return true;
-}
+pub const requireFixture = @import("fixture_data.zig").require;
+
+pub const regression_paths = [_][]const u8{
+    "tests/fixtures/fuzz_regressions/crash_0c3b48b5_ts_overflow.bin",
+    "tests/fixtures/fuzz_regressions/crash_36735b5f.bin",
+    "tests/fixtures/fuzz_regressions/crash_783ca462.bin",
+    "tests/fixtures/fuzz_regressions/crash_85883b19.bin",
+    "tests/fixtures/fuzz_regressions/leak_9b88d453.bin",
+    "tests/fixtures/fuzz_regressions/oom_9c36f721.bin",
+};
 
 // -----------------------------------------------------------------------
 // Synthetic Hap frame builders, shared by decoder_test.zig and
@@ -220,8 +223,7 @@ pub fn createChunkedFrame(
 // -----------------------------------------------------------------------
 // Fixture helpers.
 //
-// Fixture paths are repo-root-relative. Missing fixtures skip tests;
-// synthetic tests still run in stripped checkouts.
+// Fixture paths are repo-root-relative.
 // -----------------------------------------------------------------------
 
 /// An open fixture: the mapped file plus the demuxer that parsed it.
@@ -240,14 +242,8 @@ pub const Fixture = struct {
     }
 };
 
-/// Map and demux the fixture at `path`. A missing file yields
-/// `error.SkipZigTest`, which a whole test can propagate and a per-case loop
-/// can catch to skip just that case.
 pub fn openFixture(path: []const u8) !Fixture {
-    var reader = MmapReader.init(path) catch |err| switch (err) {
-        error.OpenFailed => return error.SkipZigTest,
-        else => return err,
-    };
+    var reader = try @import("fixture_data.zig").open(path);
     errdefer reader.deinit();
 
     var dem: Demuxer = .{};

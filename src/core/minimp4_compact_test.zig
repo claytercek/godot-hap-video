@@ -393,22 +393,10 @@ test "malformed stz2 fields timing overflow and byte offset overflow fail safely
 }
 
 test "compact parser replays the existing demuxer fuzz regression corpus" {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    const paths = [_][]const u8{
-        "tests/fixtures/fuzz_regressions/crash_0c3b48b5_ts_overflow.bin",
-        "tests/fixtures/fuzz_regressions/crash_36735b5f.bin",
-        "tests/fixtures/fuzz_regressions/crash_783ca462.bin",
-        "tests/fixtures/fuzz_regressions/crash_85883b19.bin",
-        "tests/fixtures/fuzz_regressions/leak_9b88d453.bin",
-        "tests/fixtures/fuzz_regressions/oom_9c36f721.bin",
-    };
-    var replayed: usize = 0;
-    for (paths) |path| {
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, testing.allocator, .unlimited) catch |err| switch (err) {
-            error.FileNotFound => continue,
-            else => return err,
-        };
-        defer testing.allocator.free(bytes);
+    for (@import("test_support.zig").regression_paths) |path| {
+        var reader = try @import("fixture_data.zig").open(path);
+        defer reader.deinit();
+        const bytes = reader.data;
         if (hap_mp4d_open(bytes.ptr, @intCast(bytes.len))) |ctx| {
             defer hap_mp4d_close(ctx);
             for (0..hap_mp4d_track_count(ctx)) |track_index| {
@@ -419,8 +407,5 @@ test "compact parser replays the existing demuxer fuzz regression corpus" {
                 _ = hap_mp4d_frame_offset(ctx, track, count, null, null, null);
             }
         }
-        replayed += 1;
     }
-    if (replayed == 0) return error.SkipZigTest;
-    try testing.expectEqual(paths.len, replayed);
 }

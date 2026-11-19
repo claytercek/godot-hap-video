@@ -115,14 +115,7 @@ fn freeSeedFrames(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged([]
 // Smith's length-prefix read, then runs an implicit empty-input case.
 // -----------------------------------------------------------------------
 
-const regression_paths = [_][]const u8{
-    "tests/fixtures/fuzz_regressions/crash_0c3b48b5_ts_overflow.bin",
-    "tests/fixtures/fuzz_regressions/crash_36735b5f.bin",
-    "tests/fixtures/fuzz_regressions/crash_783ca462.bin",
-    "tests/fixtures/fuzz_regressions/crash_85883b19.bin",
-    "tests/fixtures/fuzz_regressions/leak_9b88d453.bin",
-    "tests/fixtures/fuzz_regressions/oom_9c36f721.bin",
-};
+const regression_paths = test_support.regression_paths;
 
 test "fuzz decoder.decode on arbitrary bytes" {
     var readers: [regression_paths.len]MmapReader = undefined;
@@ -136,9 +129,9 @@ test "fuzz decoder.decode on arbitrary bytes" {
     defer corpus.deinit(testing.allocator);
 
     for (regression_paths) |path| {
-        readers[opened] = MmapReader.init(path) catch continue; // fixture missing: skip, don't fail the suite
-        try corpus.append(testing.allocator, readers[opened].data);
+        readers[opened] = try @import("fixture_data.zig").open(path);
         opened += 1;
+        try corpus.append(testing.allocator, readers[opened - 1].data);
     }
     for (seeds.items) |frame| try corpus.append(testing.allocator, frame);
 

@@ -187,7 +187,6 @@ test "validateSamples handles offset and size summing past 4 GB" {
 // Demuxer tests with repo-root-relative fixture paths.
 // -----------------------------------------------------------------------
 
-/// Open `path` with test_support.openFixture, skipping missing fixtures.
 /// Check fourcc, dimensions, and frame_count. Run any `extra` assertions
 /// (e.g. frame_rate) before closing the demuxer.
 fn expectFixtureOpensAs(
