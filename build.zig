@@ -110,6 +110,7 @@ pub fn build(b: *Build) !void {
     // Tests read LFS fixtures at runtime, outside the compiler's cache key.
     core_tests.has_side_effects = true;
     test_step.dependOn(&core_tests.step);
+    b.step("test-core", "Run core and fixture tests only").dependOn(&core_tests.step);
 
     const smoke_mod = b.createModule(.{
         .root_source_file = b.path("tools/smoke.zig"),

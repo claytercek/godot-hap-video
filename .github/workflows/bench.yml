@@ -10,6 +10,10 @@ permissions:
   contents: read
   pull-requests: write
 
+concurrency:
+  group: bench-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   bench:
     name: Benchmark
@@ -25,6 +29,7 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
+          cache-key: bench
 
       - name: Run benchmarks
         run: zig build bench -- --json bench-results.json

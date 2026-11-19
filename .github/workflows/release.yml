@@ -111,8 +111,15 @@ jobs:
   build:
     needs: release
     if: always() && !cancelled() && (needs.release.outputs.created == 'true' || (github.event_name == 'workflow_dispatch' && inputs.package-only))
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux, macos, windows]
+        flavor: [debug, release]
     uses: ./.github/workflows/build.yml
     with:
+      platform: ${{ matrix.platform }}
+      flavor: ${{ matrix.flavor }}
       ref: ${{ inputs.package-only && (inputs.release-tag || github.sha) || needs.release.outputs.tag_name }}
     permissions:
       contents: read
@@ -147,15 +154,8 @@ jobs:
           version: 0.17.0
       - uses: actions/download-artifact@v4
         with:
-          name: hap-video-macos
-          path: staging
-      - uses: actions/download-artifact@v4
-        with:
-          name: hap-video-linux
-          path: staging
-      - uses: actions/download-artifact@v4
-        with:
-          name: hap-video-windows
+          pattern: hap-video-*
+          merge-multiple: true
           path: staging
       - name: Assemble addon
         run: |

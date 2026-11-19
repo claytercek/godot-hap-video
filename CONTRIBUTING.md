@@ -2,21 +2,21 @@
 
 ## CI validation
 
-The shared Build workflow runs one macOS/Linux/Windows matrix entirely on
-Ubuntu 24.04. Zig 0.17.0 cross-compiles six architecture targets in debug and
-release flavors; `llvm-lipo-18` combines and verifies the macOS universal
-libraries on Linux. No host Godot installation is needed for these builds.
-The `hap-video-macos`, `hap-video-linux`, and `hap-video-windows` artifacts
-remain the release-packaging inputs.
+For branch protection on `main`, require **Build & Smoke (all)** from GitHub
+Actions. The check runs on every pull request to `main` and in the merge
+queue. It passes only when all builds, the native tests, and both Godot
+smoke runs succeed. Benchmarks and UBSan report separately.
 
-Runtime tests run only on Ubuntu 24.04 with Godot 4.7.2 and 4.6.3. They install
-the Linux x86_64 release artifact and run `tools/smoke.zig` against it;
-`zig build smoke` would replace the downloaded library with a local build.
-Xvfb and Mesa software Vulkan provide rendered Forward+ smoke. PCM capture
-uses PulseAudio with a virtual 48,000 Hz stereo sink and requires the exact
-`AUDIO_SMOKE_DRIVER: PulseAudio` marker, rejecting Dummy audio and driver
-fallback. `zig build test` runs the native core, smoke runner, and package
-checker tests in the primary Godot 4.7.2 job.
+Native tests start alongside six Ubuntu 24.04 build jobs, one per platform
+and flavor. Each job cross-compiles both architectures with Zig 0.17.0;
+`llvm-lipo-18` combines and verifies the macOS universal library. Release
+packaging uses the same jobs and downloads `hap-video-<platform>-<flavor>`.
+
+Godot 4.7.2 and 4.6.3 smoke jobs start as soon as the Linux release job
+finishes. They run `tools/smoke.zig` against its x86_64 library without
+rebuilding it. Xvfb and Mesa software Vulkan provide rendered Forward+
+smoke. PCM capture uses PulseAudio with a virtual 48,000 Hz stereo sink and
+requires the exact `AUDIO_SMOKE_DRIVER: PulseAudio` marker.
 
 To run rendered checks on another OS, follow the
 [local smoke instructions](README.md#smoke-tests). For a bounded random-input

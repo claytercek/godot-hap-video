@@ -1,12 +1,5 @@
 name: Sanitizers
 
-# Run `zig build test` on every PR and nightly:
-# - debug_safety: -Dtest-optimize=debug enables Zig runtime safety checks,
-#   including bounds and overflow checks.
-# - ubsan: -Dtest-optimize=debug -Dsanitize-c=full adds UndefinedBehaviorSanitizer
-#   to the vendored C/C++ (hap, minimp4, snappy).
-# This workflow has no AddressSanitizer or ThreadSanitizer lane.
-
 on:
   pull_request:
     branches: [main]
@@ -14,18 +7,18 @@ on:
     - cron: "0 6 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: sanitizers-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   sanitize:
-    name: ${{ matrix.lane.name }}
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        lane:
-          - name: Debug safety checks
-            flags: -Dtest-optimize=debug
-          - name: UBSan
-            flags: -Dtest-optimize=debug -Dsanitize-c=full
-
+    name: UBSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,6 +29,7 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
+          cache-key: ubsan
 
-      - name: Run core tests
-        run: zig build test ${{ matrix.lane.flags }} --summary all
+      - name: Run core tests with Zig safety checks and C/C++ UBSan
+        run: zig build test-core -Dtest-optimize=debug -Dsanitize-c=full --summary all
