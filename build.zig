@@ -50,26 +50,19 @@ fn testSmokeCli(b: *Build, runner: *Build.Step.Compile, test_step: *Build.Step) 
         .target = b.graph.host,
         .imports = &.{.{ .name = "smoke", .module = runner.root_module }},
     }) });
+    const integration = b.addExecutable(.{ .name = "smoke-cli-test", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/smoke_cli.zig"),
+        .target = b.graph.host,
+    }) });
     const Mode = enum { pass, exit, timeout };
     for (std.enums.values(Mode)) |mode| {
-        const run = b.addRunArtifact(runner);
-        run.addArg("--godot");
+        const run = b.addRunArtifact(integration);
+        run.setCwd(b.path("."));
+        run.addArtifactArg(runner);
         run.addArtifactArg(child);
-        run.addArgs(&.{ "--audio", "--log-dir" });
+        run.addArg(@tagName(mode));
         _ = run.addOutputDirectoryArg(@tagName(mode));
-        run.setEnvironmentVariable("FAKE_GODOT", @tagName(mode));
-        run.expectExitCode(if (mode == .pass) 0 else 1);
-        switch (mode) {
-            .pass => {
-                run.expectStdErrMatch("res://audio_smoke.tscn");
-                run.expectStdOutMatch("AUDIO_SMOKE:");
-            },
-            .exit => run.expectStdErrMatch("exited with code 3"),
-            .timeout => {
-                run.addArgs(&.{ "--timeout", "1" });
-                run.expectStdErrMatch("SMOKE_TIMEOUT:");
-            },
-        }
+        run.expectExitCode(0);
         test_step.dependOn(&run.step);
     }
 }

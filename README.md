@@ -238,9 +238,11 @@ To test a library already installed in `project/lib/` without rebuilding it,
 run the same checker from the repository root:
 
 ```bash
-zig run tools/smoke.zig -- --audio --log-dir ci-logs
+zig run tools/smoke.zig -- --audio
 ```
 
+The runner prints its log directory under `.zig-cache/smoke/`. Use
+`--log-dir ci-logs` for a fixed artifact path; reserve it for one run at a time.
 Omit `--audio` for video only. Use `--audio-driver PulseAudio` with `--audio`
 to require that specific driver, or omit `--audio-driver` for the native
 default. With `gdvm`, pass `--godot "$(gdvm show 4.7.2)"`.

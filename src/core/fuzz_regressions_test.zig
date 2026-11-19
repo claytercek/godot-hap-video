@@ -21,6 +21,43 @@ fn replay(path: []const u8) !void {
     dem.open(testing.allocator, &reader) catch {};
 }
 
+fn firstUnregisteredFile(entries: *std.Io.Dir.Iterator, io: std.Io, paths: []const []const u8) !?[]const u8 {
+    next_entry: while (try entries.next(io)) |entry| {
+        if (entry.kind != .file or std.mem.eql(u8, entry.name, ".DS_Store")) continue;
+        for (paths) |path| {
+            if (std.mem.eql(u8, entry.name, std.fs.path.basename(path))) continue :next_entry;
+        }
+        return entry.name;
+    }
+    return null;
+}
+
 test "fuzz regressions replay without crash, leak, or hang" {
     for (test_support.regression_paths) |path| try replay(path);
+
+    // The fuzzers and compact-index tests also depend on the shared list.
+    const io = test_support.io();
+    const dir = try std.Io.Dir.cwd().openDir(io, test_support.regression_dir, .{ .iterate = true });
+    defer dir.close(io);
+    var entries = dir.iterate();
+    if (try firstUnregisteredFile(&entries, io, &test_support.regression_paths)) |name| {
+        std.debug.print("Register fuzz regression {s} in test_support.regression_paths.\n", .{name});
+        return error.UnregisteredRegressionFixture;
+    }
+}
+
+test "fuzz regression registration rejects a new binary" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    const io = testing.io;
+    const paths = &.{"fixtures/registered.bin"};
+    try tmp.dir.writeFile(io, .{ .sub_path = "registered.bin", .data = "listing only" });
+    var entries = tmp.dir.iterate();
+    try testing.expect(try firstUnregisteredFile(&entries, io, paths) == null);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "new-input", .data = "listing only" });
+    entries = tmp.dir.iterate();
+    const name = try firstUnregisteredFile(&entries, io, paths) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("new-input", name);
 }

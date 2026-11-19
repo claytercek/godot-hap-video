@@ -16,5 +16,6 @@
         "thirdparty",
         "tools",
         "tests/fake_godot.zig",
+        "tests/smoke_cli.zig",
     },
 }
